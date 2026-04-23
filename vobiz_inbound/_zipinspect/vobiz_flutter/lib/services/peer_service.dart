@@ -103,31 +103,21 @@ class PeerService {
   }
 
   Future<void> storeRemoteOffer(String offerSdp) async {
-    print('📦 [PEER] storeRemoteOffer called');
-    print('📦 [PEER] Input SDP length: ${offerSdp.length}');
     final sanitized = _sanitizeSdp(offerSdp);
-    print('📦 [PEER] Sanitized SDP length: ${sanitized.length}');
     _ensureLikelyValidOffer(sanitized);
     _storedOfferSdp = sanitized;
-    print('📦 [PEER] _storedOfferSdp set, length: ${_storedOfferSdp?.length}');
-
     Log.info(
       'WebRTC',
-      'Stored remote offer (length=${sanitized.length}, startsWithV=${sanitized.startsWith('v=0')})',
+      'Stored remote offer (length=${sanitized.length})',
     );
   }
 
   Future<String> createAnswerFromStoredOffer() async {
-    print('📦 [PEER] createAnswerFromStoredOffer called');
-    print('📦 [PEER] _storedOfferSdp is null: ${_storedOfferSdp == null}');
-    print('📦 [PEER] _storedOfferSdp length: ${_storedOfferSdp?.length ?? 0}');
     final offer = _storedOfferSdp;
     if (offer == null || offer.trim().isEmpty) {
       throw StateError(
           'No stored offer SDP. storeRemoteOffer() must run before answer().');
     }
-    print('📦 [PEER] Calling handleRemoteOffer with offer length: ${offer.length}');
-
     final answer = await handleRemoteOffer(offer);
     _storedOfferSdp = null;
     return answer;
@@ -183,6 +173,14 @@ class PeerService {
     } catch (e) {
       Log.error('WebRTC', 'Failed to apply remote answer: $e');
       rethrow;
+    }
+  }
+
+  /// Enables or disables the local microphone tracks.
+  Future<void> setMuted(bool muted) async {
+    if (_localStream == null) return;
+    for (final track in _localStream!.getAudioTracks()) {
+      track.enabled = !muted;
     }
   }
 
@@ -338,13 +336,6 @@ class PeerService {
           'Peer connection is null. Call createPeerConnection() first.');
     }
 
-    print('🔧 [PEER] _setRemoteDescriptionWithRetry called');
-    print('🔧 [PEER] SDP type: $type');
-    print('🔧 [PEER] SDP length: ${sdp.length}');
-    print('🔧 [PEER] SDP first 100 chars: ${sdp.substring(0, sdp.length > 100 ? 100 : sdp.length)}');
-    print('🔧 [PEER] SDP is null: ${sdp == null}');
-    print('🔧 [PEER] SDP isEmpty: ${sdp.isEmpty}');
-
     final candidates = <String>[
       sdp,
       _sanitizeSdp(sdp),
@@ -356,15 +347,11 @@ class PeerService {
       final candidate = candidates[i];
       try {
         final desc = rtc.RTCSessionDescription(candidate, type);
-        print(
-          '🔧 [PEER] Try #${i + 1}: sdp=${desc.sdp?.length ?? "null"}, type=${desc.type}',
-        );
         await _pc!.setRemoteDescription(desc);
-        print('🔧 [PEER] setRemoteDescription SUCCESS on try #${i + 1}');
         return;
       } catch (e) {
         lastError = e;
-        print('🔧 [PEER] Try #${i + 1} failed: $e');
+        Log.warn('WebRTC', 'setRemoteDescription try #${i + 1} failed: $e');
       }
     }
 

@@ -8,8 +8,11 @@ import 'incoming_call_screen.dart';
 
 /// Second screen of the demo app.
 ///
-/// It lets the user enter a phone number, place a call, react to incoming
-/// calls, and transition into the dedicated call screen.
+/// Handles the full multi-call flow:
+///   - outbound calls via the dialpad
+///   - "Add Call" when a call is already held (second leg for conference)
+///   - hold / resume / merge controls forwarded from [ActiveCallScreen]
+///   - incoming call popup (unchanged)
 class DialerScreen extends StatefulWidget {
   const DialerScreen({super.key});
 
@@ -27,13 +30,10 @@ class _DialerScreenState extends State<DialerScreen> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (_initialized) {
-      return;
-    }
+    if (_initialized) return;
 
-    final SdkViewModel sdkViewModel = DependencyInjection.of(
-      context,
-    ).sdkViewModel;
+    final SdkViewModel sdkViewModel =
+        DependencyInjection.of(context).sdkViewModel;
     _callViewModel = CallViewModel(sdkViewModel.client);
     _numberController = TextEditingController();
     _callViewModel.addListener(_syncTextField);
@@ -50,14 +50,16 @@ class _DialerScreenState extends State<DialerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final SdkViewModel sdkViewModel = DependencyInjection.of(
-      context,
-    ).sdkViewModel;
+    final SdkViewModel sdkViewModel =
+        DependencyInjection.of(context).sdkViewModel;
 
     return AnimatedBuilder(
-      animation: Listenable.merge(<Listenable>[sdkViewModel, _callViewModel]),
+      animation:
+          Listenable.merge(<Listenable>[sdkViewModel, _callViewModel]),
       builder: (BuildContext context, _) {
         _handleCallUiTransitions();
+
+        final bool hasHeld = _callViewModel.hasHeldCall;
 
         return Scaffold(
           backgroundColor: const Color(0xFFF3F5F8),
@@ -67,9 +69,7 @@ class _DialerScreenState extends State<DialerScreen> {
               TextButton(
                 onPressed: () async {
                   await sdkViewModel.disconnect();
-                  if (!mounted) {
-                    return;
-                  }
+                  if (!mounted) return;
                   Navigator.of(context).pop();
                 },
                 child: const Text('Logout'),
@@ -90,23 +90,36 @@ class _DialerScreenState extends State<DialerScreen> {
                           : '${sdkViewModel.connectionEvent!.connectionState.name} / '
                               '${sdkViewModel.connectionEvent!.registrationState.name}',
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 8),
                     _InfoPanel(
                       title: 'Call Status',
-                      body: _callViewModel.latestCallEvent == null
+                      body: _callViewModel.activeCall == null
                           ? 'No active call'
-                          : '${_callViewModel.latestCallEvent!.state.name}'
-                              '${_callViewModel.activeCallId == null ? '' : ' | ${_callViewModel.activeCallId}'}',
+                          : '${_callViewModel.activeCall!.state.name}'
+                              ' | ${_callViewModel.activeCall!.remoteIdentity}',
                     ),
-                    const SizedBox(height: 24),
+
+                    // Held-call info panel — visible when a call is parked.
+                    if (hasHeld) ...<Widget>[
+                      const SizedBox(height: 8),
+                      _HeldCallPanel(
+                        identity: _callViewModel.heldRemoteIdentity,
+                        onResume: _callViewModel.resumeHeldCall,
+                      ),
+                    ],
+
+                    const SizedBox(height: 16),
+
                     TextField(
                       controller: _numberController,
                       keyboardType: TextInputType.phone,
-                      decoration: const InputDecoration(
-                        labelText: 'Enter Number',
+                      decoration: InputDecoration(
+                        labelText: hasHeld
+                            ? 'Enter number for second call'
+                            : 'Enter Number',
                         hintText: 'Destination number',
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.dialpad_rounded),
+                        border: const OutlineInputBorder(),
+                        prefixIcon: const Icon(Icons.dialpad_rounded),
                       ),
                       onChanged: _callViewModel.setDestination,
                     ),
@@ -116,12 +129,16 @@ class _DialerScreenState extends State<DialerScreen> {
                       onBackspace: _callViewModel.backspace,
                     ),
                     const SizedBox(height: 20),
+
+                    // Primary call button — changes to "Add Call" when a call is held.
                     SizedBox(
                       width: double.infinity,
                       child: FilledButton.icon(
-                        onPressed:
-                            _callViewModel.isBusy || !sdkViewModel.isConnected
-                                ? null
+                        onPressed: _callViewModel.isBusy ||
+                                !sdkViewModel.isConnected
+                            ? null
+                            : hasHeld
+                                ? _callViewModel.addCallToConference
                                 : _callViewModel.makeCall,
                         icon: _callViewModel.isBusy
                             ? const SizedBox(
@@ -132,14 +149,19 @@ class _DialerScreenState extends State<DialerScreen> {
                                   color: Colors.white,
                                 ),
                               )
-                            : const Icon(Icons.call),
-                        label: const Text('Call'),
+                            : Icon(
+                                hasHeld ? Icons.call_merge : Icons.call,
+                              ),
+                        label: Text(hasHeld ? 'Add Call' : 'Call'),
                         style: FilledButton.styleFrom(
                           padding: const EdgeInsets.symmetric(vertical: 18),
+                          backgroundColor:
+                              hasHeld ? const Color(0xFF16A34A) : null,
                         ),
                       ),
                     ),
                     const SizedBox(height: 12),
+
                     SizedBox(
                       width: double.infinity,
                       child: OutlinedButton.icon(
@@ -147,12 +169,13 @@ class _DialerScreenState extends State<DialerScreen> {
                             ? _callViewModel.hangup
                             : null,
                         icon: const Icon(Icons.call_end),
-                        label: const Text('End Call'),
+                        label: const Text('End All Calls'),
                         style: OutlinedButton.styleFrom(
                           padding: const EdgeInsets.symmetric(vertical: 18),
                         ),
                       ),
                     ),
+
                     if (_callViewModel.errorMessage != null &&
                         _callViewModel.errorMessage!.isNotEmpty) ...<Widget>[
                       const SizedBox(height: 16),
@@ -172,9 +195,7 @@ class _DialerScreenState extends State<DialerScreen> {
   }
 
   void _syncTextField() {
-    if (_numberController.text == _callViewModel.enteredNumber) {
-      return;
-    }
+    if (_numberController.text == _callViewModel.enteredNumber) return;
     _numberController.value = TextEditingValue(
       text: _callViewModel.enteredNumber,
       selection: TextSelection.collapsed(
@@ -186,14 +207,12 @@ class _DialerScreenState extends State<DialerScreen> {
   void _handleCallUiTransitions() {
     final bool shouldShowIncomingPopup = _callViewModel.isIncomingRinging;
     final bool shouldShowCallScreen =
-        _callViewModel.isCalling && !_callViewModel.isIncomingRinging;
+        _callViewModel.hasActiveCall && !_callViewModel.isIncomingRinging;
 
     if (shouldShowIncomingPopup && !_incomingDialogVisible) {
       _incomingDialogVisible = true;
       WidgetsBinding.instance.addPostFrameCallback((_) async {
-        if (!mounted) {
-          return;
-        }
+        if (!mounted) return;
         await showDialog<void>(
           context: context,
           barrierDismissible: false,
@@ -217,9 +236,7 @@ class _DialerScreenState extends State<DialerScreen> {
 
     if (_incomingDialogVisible && !shouldShowIncomingPopup) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) {
-          return;
-        }
+        if (!mounted) return;
         Navigator.of(context, rootNavigator: true).maybePop();
       });
     }
@@ -227,25 +244,33 @@ class _DialerScreenState extends State<DialerScreen> {
     if (shouldShowCallScreen && !_callScreenVisible) {
       _callScreenVisible = true;
       WidgetsBinding.instance.addPostFrameCallback((_) async {
-        if (!mounted) {
-          return;
-        }
+        if (!mounted) return;
         await Navigator.of(context).push(
           MaterialPageRoute<void>(
             builder: (_) => AnimatedBuilder(
               animation: _callViewModel,
               builder: (BuildContext context, __) {
+                final CallInfo? active = _callViewModel.activeCall;
+                final bool isHeld = active?.isHeld ?? false;
+
                 return ActiveCallScreen(
                   remoteIdentity: _callViewModel.remoteIdentity,
-                  callState:
-                      _callViewModel.latestCallEvent?.state.name ?? 'Call',
+                  callState: active?.state.name ?? 'Call',
                   isMuted: _callViewModel.isMuted,
-                  onToggleMute: _callViewModel.toggleMute,
+                  isHeld: isHeld,
+                  canMerge: _callViewModel.canMerge,
+                  heldRemoteIdentity: _callViewModel.hasHeldCall
+                      ? _callViewModel.heldRemoteIdentity
+                      : null,
+                  onToggleMute: () => _callViewModel.toggleMute(),
+                  onHold: isHeld
+                      ? () => _callViewModel.resumeHeldCall()
+                      : () => _callViewModel.holdActiveCall(),
+                  onMerge: () => _callViewModel.mergeConference(),
                   onHangup: () async {
-                    await _callViewModel.hangup();
-                    if (context.mounted) {
-                      Navigator.of(context).pop();
-                    }
+                    final String? id = _callViewModel.activeCallId;
+                    if (id != null) await _callViewModel.hangupCall(id);
+                    if (context.mounted) Navigator.of(context).pop();
                   },
                 );
               },
@@ -259,14 +284,16 @@ class _DialerScreenState extends State<DialerScreen> {
 
     if (_callScreenVisible && !shouldShowCallScreen) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) {
-          return;
-        }
+        if (!mounted) return;
         Navigator.of(context).maybePop();
       });
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Info panels
+// ---------------------------------------------------------------------------
 
 class _InfoPanel extends StatelessWidget {
   const _InfoPanel({required this.title, required this.body});
@@ -304,6 +331,65 @@ class _InfoPanel extends StatelessWidget {
   }
 }
 
+class _HeldCallPanel extends StatelessWidget {
+  const _HeldCallPanel({
+    required this.identity,
+    required this.onResume,
+  });
+
+  final String identity;
+  final VoidCallback onResume;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFEF3C7),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFF59E0B)),
+      ),
+      child: Row(
+        children: <Widget>[
+          const Icon(Icons.pause_circle_outline,
+              color: Color(0xFFB45309), size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  'On Hold',
+                  style: TextStyle(
+                    color: Colors.amber.shade900,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 12,
+                  ),
+                ),
+                Text(
+                  identity.isEmpty ? 'Unknown' : identity,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 15,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed: onResume,
+            child: const Text('Resume'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dial pad
+// ---------------------------------------------------------------------------
+
 class _DialPad extends StatelessWidget {
   const _DialPad({required this.onKeyTap, required this.onBackspace});
 
@@ -311,18 +397,10 @@ class _DialPad extends StatelessWidget {
   final VoidCallback onBackspace;
 
   static const List<String> _keys = <String>[
-    '1',
-    '2',
-    '3',
-    '4',
-    '5',
-    '6',
-    '7',
-    '8',
-    '9',
-    '*',
-    '0',
-    '#',
+    '1', '2', '3',
+    '4', '5', '6',
+    '7', '8', '9',
+    '*', '0', '#',
   ];
 
   @override

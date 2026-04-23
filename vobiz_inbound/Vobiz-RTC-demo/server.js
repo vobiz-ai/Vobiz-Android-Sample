@@ -1,19 +1,232 @@
 require('dotenv').config();
-const http = require('http');
+const http  = require('http');
+const https = require('https');
 const { URL } = require('url');
 const querystring = require('querystring');
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
 
-const port = 3000;
-const callerId = process.env.CALLER_ID || '';
-const sipEndpoint = process.env.SIP_ENDPOINT;
+const port               = 3000;
+const callerId           = process.env.CALLER_ID            || '';
+const sipEndpoint        = process.env.SIP_ENDPOINT;
 const defaultDestination = process.env.DEFAULT_DESTINATION;
 const defaultCountryCode = process.env.DEFAULT_COUNTRY_CODE || '91';
 
-// Stores the most recent outbound destination sent by the Flutter app.
+// Vobiz REST API credentials (from Vobiz dashboard → Settings → API Keys)
+// Required for hold announcement feature; falls back to silent hold without them.
+const vobizAccountSid = (process.env.VOBIZ_ACCOUNT_SID || '').trim();
+const vobizAuthToken  = (process.env.VOBIZ_AUTH_TOKEN  || '').trim();
+// Your ngrok / public HTTPS URL (e.g. https://abc123.ngrok.io)
+// Required for conference + hold announcement to work.
+const publicUrl = (process.env.PUBLIC_URL || '').trim().replace(/\/$/, '');
+
+// ---------------------------------------------------------------------------
+// Runtime state
+// ---------------------------------------------------------------------------
+
 let lastDialedNumber = null;
 const registeredPushTokens = new Map();
+
+// Legacy conference state (used by the "add-call / merge" flow)
+const conferenceRooms = new Map();
+const callToRoom      = new Map();
+
+// Active call state
+// Shape: { roomId, sdkCallSid, pstnNumber, pstnCallUuid, warmTargetNumber, warmTargetUuid,
+//          addedCallNumber, addedCallUuid,
+//          secondCallNumber, secondCallUuid, firstCallActive }
+// pstnCallUuid    — original PSTN caller's UUID (captured at /conference-join)
+// warmTargetUuid  — warm-transfer target's UUID  (captured at /conference-join?type=warm)
+// addedCallUuid   — merged add-call party's UUID (captured at /conference-join?type=added)
+// secondCallUuid  — Option-B second call UUID    (captured at /conference-join?type=second)
+// firstCallActive — true = PSTN1 is in conf, false = PSTN2 is in conf (Option B only)
+let activeCall = null;
+
+// ---------------------------------------------------------------------------
+// Vobiz REST API helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Authenticated request to Vobiz (Plivo-compatible) REST API.
+ * method defaults to POST; pass 'GET' for reads, 'DELETE' for stop-speak etc.
+ */
+function vobizApi(apiPath, params, method = 'POST') {
+    return new Promise((resolve, reject) => {
+        if (!vobizAccountSid || !vobizAuthToken) {
+            return reject(new Error(
+                'VOBIZ_ACCOUNT_SID / VOBIZ_AUTH_TOKEN not set — hold announcement unavailable'
+            ));
+        }
+
+        // Only POST/PUT send a body; GET and DELETE do not.
+        const postData = (method === 'POST' || method === 'PUT') && params
+            ? (typeof params === 'string' ? params : new URLSearchParams(params).toString())
+            : '';
+
+        const auth = Buffer.from(`${vobizAccountSid}:${vobizAuthToken}`).toString('base64');
+
+        const headers = {
+            'Authorization': `Basic ${auth}`,
+        };
+        if (postData) {
+            headers['Content-Type']   = 'application/x-www-form-urlencoded';
+            headers['Content-Length'] = Buffer.byteLength(postData);
+        }
+
+        const options = {
+            hostname: 'api.vobiz.ai',
+            path:     `/api/v1${apiPath}`,
+            method,
+            headers,
+        };
+
+        const req = https.request(options, (res) => {
+            let body = '';
+            res.on('data', d => body += d);
+            res.on('end', () => {
+                console.log(`[vobiz-api] ${res.statusCode} ${method} ${apiPath}`);
+                if (res.statusCode >= 200 && res.statusCode < 300) {
+                    try { resolve(JSON.parse(body)); } catch { resolve(body); }
+                } else {
+                    reject(new Error(`Vobiz API ${res.statusCode}: ${body.substring(0, 300)}`));
+                }
+            });
+        });
+        req.on('error', reject);
+        if (postData) req.write(postData);
+        req.end();
+    });
+}
+
+/**
+ * Outbound-dial the PSTN number into a named conference room.
+ * Vobiz uses Plivo-compatible lowercase snake_case parameters.
+ */
+function dialPstnIntoConference(pstnNumber, roomId) {
+    return vobizApi(`/Account/${vobizAccountSid}/Call/`, {
+        to:             pstnNumber,
+        from:           callerId,
+        answer_url:     `${publicUrl}/conference-join?room=${encodeURIComponent(roomId)}`,
+        answer_method:  'GET',
+        hangup_url:     `${publicUrl}/pstn-status`,
+        hangup_method:  'POST',
+    });
+}
+
+/**
+ * Outbound-dial the warm-transfer target into an existing conference room.
+ * Uses ?type=warm so /conference-join stores the UUID separately and doesn't
+ * overwrite the original PSTN caller's pstnCallUuid.
+ */
+function dialWarmTargetIntoConference(targetNumber, roomId) {
+    return vobizApi(`/Account/${vobizAccountSid}/Call/`, {
+        to:             targetNumber,
+        from:           callerId,
+        answer_url:     `${publicUrl}/conference-join?room=${encodeURIComponent(roomId)}&type=warm`,
+        answer_method:  'GET',
+        hangup_url:     `${publicUrl}/pstn-status`,
+        hangup_method:  'POST',
+    });
+}
+
+/**
+ * Outbound-dial an Option-B second call into an existing conference room.
+ * Uses ?type=second so /conference-join stores the UUID in secondCallUuid.
+ */
+function dialSecondCallIntoConference(targetNumber, roomId) {
+    return vobizApi(`/Account/${vobizAccountSid}/Call/`, {
+        to:             targetNumber,
+        from:           callerId,
+        answer_url:     `${publicUrl}/conference-join?room=${encodeURIComponent(roomId)}&type=second`,
+        answer_method:  'GET',
+        hangup_url:     `${publicUrl}/pstn-status`,
+        hangup_method:  'POST',
+    });
+}
+
+/**
+ * Outbound-dial an added party into an existing conference room.
+ * Uses ?type=added so /conference-join stores the UUID in addedCallUuid.
+ */
+function dialAddedPartyIntoConference(targetNumber, roomId) {
+    return vobizApi(`/Account/${vobizAccountSid}/Call/`, {
+        to:             targetNumber,
+        from:           callerId,
+        answer_url:     `${publicUrl}/conference-join?room=${encodeURIComponent(roomId)}&type=added`,
+        answer_method:  'GET',
+        hangup_url:     `${publicUrl}/pstn-status`,
+        hangup_method:  'POST',
+    });
+}
+
+/**
+ * Hang up a specific call leg by UUID.
+ */
+function vobizHangupCall(callUuid) {
+    return vobizApi(`/Account/${vobizAccountSid}/Call/${callUuid}/`, null, 'DELETE');
+}
+
+/**
+ * Redirect a live call to a new answer URL.
+ * Used to send the PSTN leg to the hold-loop TTS page or back to the conference.
+ * Vobiz (Plivo-compatible) Transfer Call: POST /Account/{authId}/Call/{callUuid}/
+ */
+function redirectCallTo(callUuid, url) {
+    // Vobiz (Plivo-compatible) Transfer Call API uses aleg_url / aleg_method.
+    return vobizApi(`/Account/${vobizAccountSid}/Call/${callUuid}/`, {
+        aleg_url:    url,
+        aleg_method: 'GET',
+    });
+}
+
+/** Returns true when conference-mode hold announcement can be used. */
+function canUseConferenceMode() {
+    return !!(vobizAccountSid && vobizAuthToken && publicUrl && lastDialedNumber);
+}
+
+// ---------------------------------------------------------------------------
+// Legacy conference helpers (add-call / merge flow)
+// ---------------------------------------------------------------------------
+
+function createConferenceRoom(callId1, callId2) {
+    const roomId = `conf_${Date.now()}`;
+    conferenceRooms.set(roomId, { callIds: new Set([callId1, callId2]), createdAt: new Date() });
+    callToRoom.set(callId1, roomId);
+    callToRoom.set(callId2, roomId);
+    console.log(`[conference] Room ${roomId} created for calls ${callId1}, ${callId2}`);
+    return roomId;
+}
+
+function getRoomForCall(callId) {
+    return callToRoom.get(callId) || null;
+}
+
+function removeCallFromRoom(callId) {
+    const roomId = callToRoom.get(callId);
+    if (!roomId) return;
+    callToRoom.delete(callId);
+    const room = conferenceRooms.get(roomId);
+    if (room) {
+        room.callIds.delete(callId);
+        if (room.callIds.size === 0) {
+            conferenceRooms.delete(roomId);
+            console.log(`[conference] Room ${roomId} closed`);
+        }
+    }
+}
+
+function buildConferenceXml(roomId, cid) {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Dial callerId="${escapeXml(cid)}">
+        <Conference>${escapeXml(roomId)}</Conference>
+    </Dial>
+</Response>`;
+}
+
+// ---------------------------------------------------------------------------
+// General utilities
+// ---------------------------------------------------------------------------
 
 function normalizePhoneNumber(value) {
     if (!value) return '';
@@ -32,30 +245,19 @@ function formatToE164(value) {
 }
 
 function isSameNumber(a, b) {
-    const left = normalizePhoneNumber(a).replace(/^\+/, '');
+    const left  = normalizePhoneNumber(a).replace(/^\+/, '');
     const right = normalizePhoneNumber(b).replace(/^\+/, '');
     return left.length > 0 && left === right;
 }
 
 function parseBody(req, body) {
     const contentType = String(req.headers['content-type'] || '').toLowerCase();
-
     if (contentType.includes('application/json')) {
-        if (!body.trim()) {
-            return {};
-        }
-
-        try {
-            return JSON.parse(body);
-        } catch (error) {
-            throw new Error(`Invalid JSON body: ${error.message}`);
-        }
+        if (!body.trim()) return {};
+        try { return JSON.parse(body); }
+        catch (e) { throw new Error(`Invalid JSON body: ${e.message}`); }
     }
-
-    if (!body.trim()) {
-        return {};
-    }
-
+    if (!body.trim()) return {};
     return querystring.parse(body);
 }
 
@@ -63,6 +265,12 @@ function sendXml(res, xml) {
     res.statusCode = 200;
     res.setHeader('Content-Type', 'text/xml');
     res.end(xml);
+}
+
+function sendJson(res, statusCode, obj) {
+    res.statusCode = statusCode;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(obj));
 }
 
 function sendText(res, statusCode, message) {
@@ -80,11 +288,9 @@ function maskSecret(value) {
 function redactSensitiveParams(params) {
     const redacted = {};
     for (const [key, value] of Object.entries(params || {})) {
-        if (/(password|pass|token|secret)/i.test(key)) {
-            redacted[key] = maskSecret(value);
-            continue;
-        }
-        redacted[key] = value;
+        redacted[key] = /(password|pass|token|secret)/i.test(key)
+            ? maskSecret(value)
+            : value;
     }
     return redacted;
 }
@@ -103,30 +309,16 @@ function hasPlaceholder(value) {
 }
 
 function validateCallerId(value) {
-    if (!value) {
-        return 'Server misconfigured: CALLER_ID environment variable is not set.';
-    }
-
-    if (hasPlaceholder(value)) {
-        return 'Server misconfigured: CALLER_ID still contains placeholder markers. Use a real number like +918046733542 (no < >).';
-    }
-
+    if (!value)               return 'Server misconfigured: CALLER_ID not set.';
+    if (hasPlaceholder(value)) return 'Server misconfigured: CALLER_ID still has placeholder markers.';
     return '';
 }
 
 function validateSipEndpoint(value) {
-    if (!value) {
-        return 'Server misconfigured: SIP_ENDPOINT environment variable is not set.';
-    }
-
-    if (hasPlaceholder(value)) {
-        return 'Server misconfigured: SIP_ENDPOINT still contains placeholder markers. Use a real endpoint like sip:username@registrar.vobiz.ai (no < >).';
-    }
-
-    if (!String(value).startsWith('sip:') || !String(value).includes('@')) {
-        return 'Server misconfigured: SIP_ENDPOINT must be a SIP URI like sip:username@registrar.vobiz.ai.';
-    }
-
+    if (!value)                return 'Server misconfigured: SIP_ENDPOINT not set.';
+    if (hasPlaceholder(value)) return 'Server misconfigured: SIP_ENDPOINT still has placeholder markers.';
+    if (!String(value).startsWith('sip:') || !String(value).includes('@'))
+        return 'Server misconfigured: SIP_ENDPOINT must be sip:username@registrar.vobiz.ai';
     return '';
 }
 
@@ -141,65 +333,50 @@ function buildConfigErrorResponseXml(message) {
 </Response>`;
 }
 
-const server = http.createServer((req, res) => {
-    console.log(`[${new Date().toISOString()}] Request: ${req.method} ${req.url}`);
+// ---------------------------------------------------------------------------
+// HTTP server
+// ---------------------------------------------------------------------------
 
+const server = http.createServer((req, res) => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+
+    // ── Static files ────────────────────────────────────────────────────────
     if (req.url.startsWith('/client')) {
         const filePath = path.join(__dirname, req.url);
-
         fs.readFile(filePath, (err, data) => {
-            if (err) {
-                console.error('File not found:', filePath);
-                res.writeHead(404);
-                res.end('Not found');
-                return;
-            }
-
-            if (filePath.endsWith('.html')) {
-                res.setHeader('Content-Type', 'text/html');
-            } else if (filePath.endsWith('.js')) {
-                res.setHeader('Content-Type', 'application/javascript');
-            } else if (filePath.endsWith('.css')) {
-                res.setHeader('Content-Type', 'text/css');
-            } else if (filePath.endsWith('.png')) {
-                res.setHeader('Content-Type', 'image/png');
-            }
-
+            if (err) { res.writeHead(404); res.end('Not found'); return; }
+            if (filePath.endsWith('.html'))  res.setHeader('Content-Type', 'text/html');
+            else if (filePath.endsWith('.js'))  res.setHeader('Content-Type', 'application/javascript');
+            else if (filePath.endsWith('.css')) res.setHeader('Content-Type', 'text/css');
+            else if (filePath.endsWith('.png')) res.setHeader('Content-Type', 'image/png');
             res.writeHead(200);
             res.end(data);
         });
-
         return;
     }
 
+    // ── Collect body then route ─────────────────────────────────────────────
     let body = '';
-    req.on('data', (chunk) => {
-        body += chunk.toString();
-    });
-
-    req.on('end', () => {
+    req.on('data', chunk => body += chunk.toString());
+    req.on('end', async () => {
         const parsedUrl = new URL(req.url, `http://localhost:${port}`);
         const queryParams = Object.fromEntries(parsedUrl.searchParams.entries());
 
         let bodyParams = {};
         try {
             bodyParams = parseBody(req, body);
-        } catch (error) {
-            console.error('Failed to parse request body:', error.message);
-            sendText(res, 400, error.message);
+        } catch (e) {
+            sendText(res, 400, e.message);
             return;
         }
 
         const params = { ...queryParams, ...bodyParams };
         console.log(`[params] ${JSON.stringify(redactSensitiveParams(params))}`);
 
+        // ── POST /call ─────────────────────────────────────────────────────
         if (req.method === 'POST' && parsedUrl.pathname === '/call') {
             const requestedDestination =
-                params.to ||
-                params.To ||
-                params.destination ||
-                params.Destination ||
-                '';
+                params.to || params.To || params.destination || params.Destination || '';
 
             const formattedDestination = formatToE164(requestedDestination);
             if (!formattedDestination) {
@@ -208,51 +385,536 @@ const server = http.createServer((req, res) => {
             }
 
             if (callerId && isSameNumber(formattedDestination, callerId)) {
-                console.error(`Blocked self-call from /call: ${formattedDestination} == ${callerId}`);
                 sendText(res, 400, 'Destination cannot be same as callerId');
                 return;
             }
 
             lastDialedNumber = formattedDestination;
-            console.log(`Outbound destination stored from app -> ${lastDialedNumber}`);
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true, destination: lastDialedNumber }));
+            activeCall = null; // reset any previous call state
+            console.log(`Outbound destination stored: ${lastDialedNumber}`);
+            sendJson(res, 200, { success: true, destination: lastDialedNumber });
             return;
         }
 
+        // ── POST /conference  (legacy add-call / merge) ────────────────────
+        if (req.method === 'POST' && parsedUrl.pathname === '/conference') {
+            const callId1 = String(params.callId1 || params.callid1 || '').trim();
+            const callId2 = String(params.callId2 || params.callid2 || '').trim();
+            if (!callId1 || !callId2) {
+                sendText(res, 400, 'callId1 and callId2 are required');
+                return;
+            }
+            const roomId = createConferenceRoom(callId1, callId2);
+            sendJson(res, 200, { success: true, roomId });
+            return;
+        }
+
+        // ── POST /hold-start  (Flutter presses Hold) ───────────────────────
+        // Redirects the live PSTN leg to /hold-loop which loops TTS until resumed.
+        if (req.method === 'POST' && parsedUrl.pathname === '/hold-start') {
+            console.log('[hold-start] Received, activeCall:', JSON.stringify(activeCall));
+
+            if (activeCall && activeCall.pstnCallUuid) {
+                try {
+                    const holdUrl = `${publicUrl}/hold-loop`;
+                    console.log(`[hold-start] Redirecting PSTN ${activeCall.pstnCallUuid} -> ${holdUrl}`);
+                    await redirectCallTo(activeCall.pstnCallUuid, holdUrl);
+                    console.log('[hold-start] PSTN redirected to hold-loop ✓');
+                } catch (e) {
+                    console.error('[hold-start] Redirect failed:', e.message);
+                }
+            } else {
+                console.warn('[hold-start] pstnCallUuid not available yet — mic muted on Flutter side only');
+                console.warn('[hold-start] activeCall:', JSON.stringify(activeCall));
+            }
+
+            sendJson(res, 200, { success: true });
+            return;
+        }
+
+        // ── POST /resume  (Flutter presses Resume) ─────────────────────────
+        // Redirects the held PSTN leg back into the conference room.
+        if (req.method === 'POST' && parsedUrl.pathname === '/resume') {
+            console.log('[resume] Received, activeCall:', JSON.stringify(activeCall));
+
+            if (activeCall && activeCall.pstnCallUuid && activeCall.roomId) {
+                try {
+                    const rejoinUrl = `${publicUrl}/conference-join?room=${encodeURIComponent(activeCall.roomId)}`;
+                    console.log(`[resume] Redirecting PSTN ${activeCall.pstnCallUuid} back -> ${rejoinUrl}`);
+                    await redirectCallTo(activeCall.pstnCallUuid, rejoinUrl);
+                    console.log('[resume] PSTN redirected back to conference ✓');
+                } catch (e) {
+                    console.error('[resume] Redirect failed:', e.message);
+                }
+            } else {
+                console.warn('[resume] pstnCallUuid not available — skipping API resume');
+            }
+
+            sendJson(res, 200, { success: true });
+            return;
+        }
+
+        // ── POST /transfer  (Flutter initiates blind call transfer) ───────────
+        // Redirects the live PSTN call to /transfer-bridge which plays a brief
+        // message and then dials the new destination (PSTN number or SIP URI).
+        // The Flutter SDK leg should call hangup() after this returns.
+        if (req.method === 'POST' && parsedUrl.pathname === '/transfer') {
+            const to = String(params.to || params.To || '').trim();
+            console.log('[transfer] Received, to:', to, 'activeCall:', JSON.stringify(activeCall));
+
+            if (!to) {
+                sendJson(res, 400, { error: 'Transfer destination (to) is required' });
+                return;
+            }
+            if (!activeCall || !activeCall.pstnCallUuid) {
+                sendJson(res, 503, { error: 'No active transferable call — pstnCallUuid not yet available' });
+                return;
+            }
+
+            const transferUrl = `${publicUrl}/transfer-bridge?to=${encodeURIComponent(to)}`;
+            try {
+                await redirectCallTo(activeCall.pstnCallUuid, transferUrl);
+                console.log(`[transfer] PSTN ${activeCall.pstnCallUuid} redirected to transfer-bridge ✓`);
+                activeCall = null; // SDK will hang up — clear state now
+            } catch (e) {
+                console.error('[transfer] Redirect failed:', e.message);
+                sendJson(res, 500, { error: `Transfer failed: ${e.message}` });
+                return;
+            }
+
+            sendJson(res, 200, { success: true });
+            return;
+        }
+
+        // ── GET /transfer-bridge  (Vobiz executes this for the transferred call) ─
+        // Plays a brief "transferring" message then dials the final destination.
+        // Supports both E.164 numbers and sip: URIs.
+        if (parsedUrl.pathname === '/transfer-bridge') {
+            const to = parsedUrl.searchParams.get('to') || '';
+            console.log(`[transfer-bridge] Bridging call to: ${to}`);
+
+            let dialTarget;
+            if (to.toLowerCase().startsWith('sip:')) {
+                dialTarget = `<User>${escapeXml(to)}</User>`;
+            } else {
+                const formatted = formatToE164(to);
+                dialTarget = `<Number>${escapeXml(formatted || to)}</Number>`;
+            }
+
+            sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Speak>Please hold while we transfer your call.</Speak>
+    <Dial callerId="${escapeXml(callerId)}" timeout="60">${dialTarget}</Dial>
+    <Speak>We were unable to reach the transfer destination. Goodbye.</Speak>
+</Response>`);
+            return;
+        }
+
+        // ── POST /warm-transfer/start  (Flutter starts a warm/consultative transfer) ─
+        // Dials the transfer target into the existing conference so all three
+        // parties (SDK agent, PSTN caller, target) can speak together.
+        // Agent then presses "Complete Transfer" which just calls hangup() locally —
+        // PSTN + target remain in the conference after the agent leaves.
+        if (req.method === 'POST' && parsedUrl.pathname === '/warm-transfer/start') {
+            const to = String(params.to || params.To || '').trim();
+            console.log('[warm-transfer/start] to:', to, 'activeCall:', JSON.stringify(activeCall));
+
+            if (!to) {
+                sendJson(res, 400, { error: 'Transfer destination (to) is required' });
+                return;
+            }
+            if (!activeCall || !activeCall.roomId) {
+                sendJson(res, 503, { error: 'No active call to transfer' });
+                return;
+            }
+            if (activeCall.warmTargetNumber) {
+                sendJson(res, 409, { error: 'Warm transfer already in progress' });
+                return;
+            }
+
+            const target = to.startsWith('sip:') ? to : formatToE164(to);
+            try {
+                const result = await dialWarmTargetIntoConference(target, activeCall.roomId);
+                const requestUuid = result && (result.request_uuid || result.RequestUUID || '');
+                console.log(`[warm-transfer/start] Target dialed into conference, request_uuid: ${requestUuid}`);
+                activeCall.warmTargetNumber = target;
+                activeCall.warmTargetUuid   = null; // set when target answers /conference-join?type=warm
+            } catch (e) {
+                console.error('[warm-transfer/start] Failed to dial target:', e.message);
+                sendJson(res, 500, { error: `Failed to dial transfer target: ${e.message}` });
+                return;
+            }
+
+            sendJson(res, 200, { success: true });
+            return;
+        }
+
+        // ── POST /add-call  (Flutter adds a third party to the conference) ──
+        if (req.method === 'POST' && parsedUrl.pathname === '/add-call') {
+            const to = String(params.to || params.To || '').trim();
+            console.log('[add-call] to:', to, 'activeCall:', JSON.stringify(activeCall));
+
+            if (!to) {
+                sendJson(res, 400, { error: 'Destination (to) is required' });
+                return;
+            }
+            if (!activeCall || !activeCall.roomId) {
+                sendJson(res, 503, { error: 'No active call to add to' });
+                return;
+            }
+            if (activeCall.addedCallNumber) {
+                sendJson(res, 409, { error: 'A call has already been added to this conference' });
+                return;
+            }
+
+            const target = to.startsWith('sip:') ? to : formatToE164(to);
+            try {
+                const result = await dialAddedPartyIntoConference(target, activeCall.roomId);
+                const requestUuid = result && (result.request_uuid || result.RequestUUID || '');
+                console.log(`[add-call] Party dialed into conference, request_uuid: ${requestUuid}`);
+                activeCall.addedCallNumber = target;
+                activeCall.addedCallUuid   = null; // set when party answers /conference-join?type=added
+            } catch (e) {
+                console.error('[add-call] Failed to dial party:', e.message);
+                sendJson(res, 500, { error: `Failed to add call: ${e.message}` });
+                return;
+            }
+
+            sendJson(res, 200, { success: true });
+            return;
+        }
+
+        // ── POST /remove-added-call  (Flutter removes the added party) ──────
+        if (req.method === 'POST' && parsedUrl.pathname === '/remove-added-call') {
+            console.log('[remove-added-call] activeCall:', JSON.stringify(activeCall));
+
+            if (!activeCall || !activeCall.addedCallUuid) {
+                sendJson(res, 400, { error: 'No added call to remove' });
+                return;
+            }
+
+            try {
+                await vobizHangupCall(activeCall.addedCallUuid);
+                console.log(`[remove-added-call] Hung up addedCallUuid: ${activeCall.addedCallUuid} ✓`);
+                activeCall.addedCallNumber = null;
+                activeCall.addedCallUuid   = null;
+            } catch (e) {
+                console.error('[remove-added-call] Failed:', e.message);
+                sendJson(res, 500, { error: `Failed to remove: ${e.message}` });
+                return;
+            }
+
+            sendJson(res, 200, { success: true });
+            return;
+        }
+
+        // ── POST /second-call  (Option B: put PSTN1 on hold, dial PSTN2) ───
+        if (req.method === 'POST' && parsedUrl.pathname === '/second-call') {
+            const to = String(params.to || params.To || '').trim();
+            console.log('[second-call] to:', to, 'activeCall:', JSON.stringify(activeCall));
+
+            if (!to) {
+                sendJson(res, 400, { error: 'Destination (to) is required' });
+                return;
+            }
+            if (!activeCall || !activeCall.roomId) {
+                sendJson(res, 503, { error: 'No active call' });
+                return;
+            }
+            if (!activeCall.pstnCallUuid) {
+                sendJson(res, 503, { error: 'pstnCallUuid not yet captured — try again in a moment' });
+                return;
+            }
+            if (activeCall.secondCallNumber) {
+                sendJson(res, 409, { error: 'Second call already active' });
+                return;
+            }
+
+            const target = to.startsWith('sip:') ? to : formatToE164(to);
+            try {
+                // Hold PSTN1
+                await redirectCallTo(activeCall.pstnCallUuid, `${publicUrl}/hold-loop`);
+                console.log('[second-call] PSTN1 put on hold ✓');
+                // Dial PSTN2 into conference
+                const result = await dialSecondCallIntoConference(target, activeCall.roomId);
+                const requestUuid = result && (result.request_uuid || result.RequestUUID || '');
+                console.log(`[second-call] PSTN2 dialed, request_uuid: ${requestUuid}`);
+                activeCall.secondCallNumber = target;
+                activeCall.secondCallUuid   = null;    // set when PSTN2 answers
+                activeCall.firstCallActive  = false;   // PSTN2 will be active once it answers
+            } catch (e) {
+                console.error('[second-call] Failed:', e.message);
+                sendJson(res, 500, { error: `Failed to start second call: ${e.message}` });
+                return;
+            }
+
+            sendJson(res, 200, { success: true });
+            return;
+        }
+
+        // ── POST /swap-calls  (Option B: swap active ↔ held) ────────────────
+        if (req.method === 'POST' && parsedUrl.pathname === '/swap-calls') {
+            console.log('[swap-calls] activeCall:', JSON.stringify(activeCall));
+
+            if (!activeCall || !activeCall.pstnCallUuid || !activeCall.secondCallUuid) {
+                sendJson(res, 400, { error: 'Both call UUIDs must be available to swap' });
+                return;
+            }
+
+            const roomUrl       = `${publicUrl}/conference-join?room=${encodeURIComponent(activeCall.roomId)}`;
+            const roomUrlSecond = `${roomUrl}&type=second`;
+
+            try {
+                if (activeCall.firstCallActive) {
+                    // PSTN1 active → swap to PSTN2
+                    await redirectCallTo(activeCall.pstnCallUuid, `${publicUrl}/hold-loop`);
+                    await redirectCallTo(activeCall.secondCallUuid, roomUrlSecond);
+                    activeCall.firstCallActive = false;
+                } else {
+                    // PSTN2 active → swap to PSTN1
+                    await redirectCallTo(activeCall.secondCallUuid, `${publicUrl}/hold-loop`);
+                    await redirectCallTo(activeCall.pstnCallUuid, roomUrl);
+                    activeCall.firstCallActive = true;
+                }
+                console.log(`[swap-calls] Swapped → firstCallActive: ${activeCall.firstCallActive} ✓`);
+            } catch (e) {
+                console.error('[swap-calls] Failed:', e.message);
+                sendJson(res, 500, { error: `Swap failed: ${e.message}` });
+                return;
+            }
+
+            sendJson(res, 200, { success: true });
+            return;
+        }
+
+        // ── POST /merge-calls  (Option B: bring held leg into conference) ───
+        if (req.method === 'POST' && parsedUrl.pathname === '/merge-calls') {
+            console.log('[merge-calls] activeCall:', JSON.stringify(activeCall));
+
+            if (!activeCall || !activeCall.pstnCallUuid || !activeCall.secondCallUuid) {
+                sendJson(res, 400, { error: 'Both call UUIDs must be available to merge' });
+                return;
+            }
+
+            const roomUrl       = `${publicUrl}/conference-join?room=${encodeURIComponent(activeCall.roomId)}`;
+            const roomUrlSecond = `${roomUrl}&type=second`;
+
+            try {
+                // Redirect the held leg back into the conference — both now active
+                if (activeCall.firstCallActive) {
+                    await redirectCallTo(activeCall.secondCallUuid, roomUrlSecond);
+                } else {
+                    await redirectCallTo(activeCall.pstnCallUuid, roomUrl);
+                }
+                activeCall.firstCallActive = true; // both are in room
+                console.log('[merge-calls] Both legs merged into conference ✓');
+            } catch (e) {
+                console.error('[merge-calls] Failed:', e.message);
+                sendJson(res, 500, { error: `Merge failed: ${e.message}` });
+                return;
+            }
+
+            sendJson(res, 200, { success: true });
+            return;
+        }
+
+        // ── POST /end-second-call  (Option B: hang up PSTN2, resume PSTN1) ──
+        if (req.method === 'POST' && parsedUrl.pathname === '/end-second-call') {
+            console.log('[end-second-call] activeCall:', JSON.stringify(activeCall));
+
+            if (!activeCall) {
+                sendJson(res, 400, { error: 'No active call' });
+                return;
+            }
+
+            try {
+                if (activeCall.secondCallUuid) {
+                    await vobizHangupCall(activeCall.secondCallUuid);
+                    console.log('[end-second-call] PSTN2 hung up ✓');
+                }
+                // If PSTN1 was on hold, redirect it back to conference
+                if (!activeCall.firstCallActive && activeCall.pstnCallUuid) {
+                    const roomUrl = `${publicUrl}/conference-join?room=${encodeURIComponent(activeCall.roomId)}`;
+                    await redirectCallTo(activeCall.pstnCallUuid, roomUrl);
+                    console.log('[end-second-call] PSTN1 resumed ✓');
+                }
+                activeCall.secondCallNumber = null;
+                activeCall.secondCallUuid   = null;
+                activeCall.firstCallActive  = true;
+            } catch (e) {
+                console.error('[end-second-call] Failed:', e.message);
+                sendJson(res, 500, { error: `End second call failed: ${e.message}` });
+                return;
+            }
+
+            sendJson(res, 200, { success: true });
+            return;
+        }
+
+        // ── GET /hold-loop  (Vobiz executes this XML for the held PSTN leg) ─
+        // Loops a TTS message until the Flutter app calls /resume which redirects
+        // the PSTN leg back to /conference-join.
+        if (parsedUrl.pathname === '/hold-loop') {
+            sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Speak loop="0">Your call has been placed on hold. Please wait while we connect you.</Speak>
+</Response>`);
+            return;
+        }
+
+        // ── GET /hold-announcement  (legacy — kept for compatibility) ────────
+        if (parsedUrl.pathname === '/hold-announcement') {
+            sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Speak loop="0">Your call has been placed on hold. Please wait while we connect you.</Speak>
+</Response>`);
+            return;
+        }
+
+        // ── GET /conference-join  (PSTN or warm-transfer target answers) ──────
+        if (parsedUrl.pathname === '/conference-join') {
+            const roomId    = parsedUrl.searchParams.get('room') || '';
+            const joinType  = parsedUrl.searchParams.get('type') || '';  // 'warm' for transfer target
+            const callUuid  = params.CallUUID || params.ALegUUID || '';
+            console.log(`[conference-join] type="${joinType}" uuid="${callUuid}" room="${roomId}"`);
+
+            if (activeCall && activeCall.roomId === roomId && callUuid) {
+                if (joinType === 'warm') {
+                    activeCall.warmTargetUuid = callUuid;
+                    console.log(`[conference-join] warmTargetUuid stored: ${callUuid}`);
+                } else if (joinType === 'added') {
+                    activeCall.addedCallUuid = callUuid;
+                    console.log(`[conference-join] addedCallUuid stored: ${callUuid}`);
+                } else if (joinType === 'second') {
+                    activeCall.secondCallUuid = callUuid;
+                    console.log(`[conference-join] secondCallUuid stored: ${callUuid}`);
+                } else {
+                    activeCall.pstnCallUuid = callUuid;
+                    console.log(`[conference-join] pstnCallUuid stored: ${callUuid}`);
+                }
+            }
+
+            // Plivo/Vobiz: <Conference> directly under <Response> (no <Dial> wrapper)
+            sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Conference>${escapeXml(roomId)}</Conference>
+</Response>`);
+            return;
+        }
+
+        // ── POST /conference-status  (Vobiz conference lifecycle events) ───
+        if (parsedUrl.pathname === '/conference-status') {
+            const event    = params.StatusCallbackEvent || params.Event || '';
+            const confSid  = params.ConferenceSid || '';
+            const callSid  = params.CallSid || '';
+            console.log(`[conf-status] event="${event}" conf="${confSid}" call="${callSid}"`);
+
+            if (activeCall) {
+                if (confSid && !activeCall.conferenceSid) {
+                    activeCall.conferenceSid = confSid;
+                    console.log(`[conf-status] Stored conferenceSid: ${confSid}`);
+                }
+                // The second call to join is the PSTN leg
+                if (callSid && callSid !== activeCall.sdkCallSid && !activeCall.pstnCallSid) {
+                    activeCall.pstnCallSid = callSid;
+                    console.log(`[conf-status] Stored pstnCallSid: ${callSid}`);
+                }
+            }
+
+            res.writeHead(200);
+            res.end();
+            return;
+        }
+
+        // ── POST /pstn-status  (PSTN outbound call status events) ──────────
+        if (parsedUrl.pathname === '/pstn-status') {
+            // Vobiz uses CallUUID, Twilio-compat uses CallSid
+            const callUuid = params.CallUUID || params.CallSid || params.call_uuid || '';
+            const status   = params.CallStatus || params.call_status || params.Event || '';
+            console.log(`[pstn-status] uuid="${callUuid}" status="${status}" all=${JSON.stringify(params)}`);
+
+            if (activeCall && callUuid && (status === 'answered' || status === 'in-progress' || status === 'ANSWER')) {
+                if (!activeCall.pstnCallUuid) {
+                    activeCall.pstnCallUuid = callUuid;
+                    console.log(`[pstn-status] Stored pstnCallUuid: ${callUuid}`);
+                }
+            }
+
+            if (activeCall && callUuid && (status === 'completed' || status === 'HANGUP') && activeCall.pstnCallUuid === callUuid) {
+                console.log('[pstn-status] PSTN call ended, clearing activeCall');
+                activeCall = null;
+            }
+
+            res.writeHead(200);
+            res.end();
+            return;
+        }
+
+        // ── GET /pending-call  (Flutter polls this to detect inbound calls) ──
+        if (req.method === 'GET' && parsedUrl.pathname === '/pending-call') {
+            if (activeCall && activeCall.pendingInbound) {
+                sendJson(res, 200, {
+                    pending:    true,
+                    caller:     activeCall.pstnNumber || 'Unknown',
+                    roomId:     activeCall.roomId,
+                    joinNumber: callerId,
+                });
+            } else {
+                sendJson(res, 200, { pending: false });
+            }
+            return;
+        }
+
+        // ── POST /answer-inbound  (Flutter signals it's about to join the room) ─
+        if (req.method === 'POST' && parsedUrl.pathname === '/answer-inbound') {
+            if (!activeCall || !activeCall.pendingInbound) {
+                sendJson(res, 404, { error: 'No pending inbound call' });
+                return;
+            }
+            sendJson(res, 200, { success: true });
+            return;
+        }
+
+        // ── POST /register-token ───────────────────────────────────────────
         if (req.method === 'POST' && parsedUrl.pathname === '/register-token') {
             const username = String(params.username || params.Username || '').trim();
-            const token = String(params.token || params.Token || '').trim();
-
+            const token    = String(params.token    || params.Token    || '').trim();
             if (!username || !token) {
                 sendText(res, 400, 'username and token are required');
                 return;
             }
-
             registeredPushTokens.set(username, token);
             console.log(`Push token registered for ${username}`);
-
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true }));
+            sendJson(res, 200, { success: true });
             return;
         }
 
+        // ── Hangup events ──────────────────────────────────────────────────
         const eventName =
-            params.Event ||
-            params.event ||
-            params.CallStatus ||
-            params.callstatus ||
-            '';
+            params.Event || params.event ||
+            params.CallStatus || params.callstatus || '';
 
         if (
             parsedUrl.pathname === '/hangup' ||
             String(eventName).toLowerCase().includes('hangup')
         ) {
-            console.log('Hangup event -> empty response');
+            const hungCallId = params.CallUUID || params.CallSid || params.callSid || params.callId || '';
+            if (hungCallId) removeCallFromRoom(hungCallId);
+
+            if (activeCall && (
+                activeCall.sdkCallSid  === hungCallId ||
+                activeCall.pstnCallUuid === hungCallId
+            )) {
+                console.log('[hangup] Clearing activeCall');
+                activeCall = null;
+            }
+
+            console.log(`Hangup event${hungCallId ? ` (${hungCallId})` : ''}`);
             sendXml(res, buildEmptyResponseXml());
             return;
         }
 
+        // ── Answer webhook (/  or  /answer) ───────────────────────────────
         const isAnswerWebhook =
             parsedUrl.pathname === '/' || parsedUrl.pathname === '/answer';
 
@@ -261,6 +923,7 @@ const server = http.createServer((req, res) => {
             return;
         }
 
+        // Validate config
         const callerIdError = validateCallerId(callerId);
         if (callerIdError) {
             console.error(callerIdError);
@@ -268,110 +931,208 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        const rawFrom = params.From || params.from || '';
-        const routeType = String(params.RouteType || params.routeType || '').toLowerCase();
-        const isSdkCall = rawFrom.startsWith('sip:') || routeType === 'sip';
+        const rawFrom    = params.From || params.from || '';
+        const routeType  = String(params.RouteType || params.routeType || '').toLowerCase();
+        const isSdkCall  = rawFrom.startsWith('sip:') || routeType === 'sip';
 
+        // ── Outbound SDK call ──────────────────────────────────────────────
         if (isSdkCall) {
-            let destination =
-                lastDialedNumber ||
-                params.To ||
-                params.to ||
-                params.Destination ||
-                params.destination ||
-                '';
+            // Vobiz sends CallUUID (not CallSid like Twilio)
+            const sdkCallSid =
+                params.CallUUID || params.CallSid || params.callSid || params.callId || params.call_id || '';
 
-            if (String(destination).startsWith('sip:')) {
-                const match = String(destination).match(/^sip:(.*?)@/);
-                if (match && match[1]) {
-                    destination = match[1];
-                }
+            // Check legacy conference merge first
+            const legacyRoom = sdkCallSid ? getRoomForCall(sdkCallSid) : null;
+            if (legacyRoom) {
+                console.log(`[legacy-conference] ${sdkCallSid} -> room ${legacyRoom}`);
+                sendXml(res, buildConferenceXml(legacyRoom, callerId));
+                return;
             }
 
+            // Resolve destination
+            let destination =
+                lastDialedNumber ||
+                params.To || params.to ||
+                params.Destination || params.destination || '';
+
+            if (String(destination).startsWith('sip:')) {
+                const m = String(destination).match(/^sip:(.*?)@/);
+                if (m && m[1]) destination = m[1];
+            }
             destination = formatToE164(destination);
 
             if (!destination) {
                 if (defaultDestination) {
                     destination = formatToE164(defaultDestination);
-                    console.log('No destination found, using DEFAULT_DESTINATION:', destination);
+                    console.log('Using DEFAULT_DESTINATION:', destination);
                 } else {
-                    console.error('No destination found for outbound call');
-                    sendText(
-                        res,
-                        400,
-                        'No destination found. Set DEFAULT_DESTINATION or POST /call first.',
-                    );
+                    sendText(res, 400, 'No destination. POST /call first or set DEFAULT_DESTINATION.');
                     return;
                 }
             }
 
+            // ── Inbound conference join ──────────────────────────────────────────
+            // SDK calls own callerId → join the active conference room.
+            // Must be checked BEFORE the "cannot call own number" guard.
+            const sdkToNumber = formatToE164(params.To || params.to || '');
+            if (activeCall && activeCall.roomId &&
+                isSameNumber(sdkToNumber, callerId)) {
+                activeCall.sdkCallSid    = sdkCallSid;
+                activeCall.pendingInbound = false;
+                console.log(`[inbound-conf] SDK (${sdkCallSid}) joined room ${activeCall.roomId} ✓`);
+                sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Conference stayAlone="true">${escapeXml(activeCall.roomId)}</Conference>
+</Response>`);
+                return;
+            }
+
             if (isSameNumber(destination, callerId)) {
-                console.error(`Blocked self-call: ${destination} == ${callerId}`);
                 sendText(res, 400, 'Cannot call your own number');
                 return;
             }
 
-            console.log(`Outbound SDK call -> bridging to ${destination}`);
 
-            const xmlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+            // ── Conference mode (enables hold announcement) ──────────────
+            if (canUseConferenceMode()) {
+                // Deduplicate: Vobiz sometimes fires /answer twice for the same call.
+                // If we already have an activeCall for this SDK UUID, just return
+                // the same conference room instead of creating a second one.
+                if (activeCall && activeCall.sdkCallSid === sdkCallSid) {
+                    console.log(`[conference-mode] Duplicate /answer for ${sdkCallSid} — reusing room ${activeCall.roomId}`);
+                    sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Conference>${activeCall.roomId}</Conference>
+</Response>`);
+                    return;
+                }
+
+                const roomId = `vr_${Date.now()}`;
+                console.log(`[conference-mode] Dialing PSTN into conference ${roomId} for ${destination}`);
+
+                try {
+                    const result = await dialPstnIntoConference(destination, roomId);
+                    const requestUuid = result && (result.request_uuid || result.RequestUUID || '');
+                    console.log(`[conference-mode] PSTN call queued, request_uuid: ${requestUuid}`);
+                    console.log(`[conference-mode] Full API response: ${JSON.stringify(result)}`);
+
+                    activeCall = {
+                        roomId,
+                        sdkCallSid,
+                        pstnNumber:   destination,
+                        pstnCallUuid: null,  // set when PSTN answers at /conference-join
+                    };
+
+                    // Plivo/Vobiz: <Conference> is a direct child of <Response>,
+                    // NOT inside <Dial> (that's Twilio syntax and is invalid here).
+                    // stayAlone="true": keep the conference alive when PSTN is temporarily
+                    // redirected to /hold-loop (otherwise Vobiz ends the 1-participant conf).
+                    sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Conference stayAlone="true">${roomId}</Conference>
+</Response>`);
+                } catch (e) {
+                    console.error('[conference-mode] REST API failed, using standard Dial:', e.message);
+                    // Fall back to standard Dial so the call still connects.
+                    sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Dial callerId="${escapeXml(callerId)}">
         <Number>${escapeXml(destination)}</Number>
     </Dial>
-</Response>`;
+</Response>`);
+                }
 
-            sendXml(res, xmlResponse);
+                return;
+            }
+
+            // ── Standard Dial mode (no hold announcement — credentials not set) ─
+            console.log(`[standard-mode] Bridging to ${destination}`);
+            sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Dial callerId="${escapeXml(callerId)}">
+        <Number>${escapeXml(destination)}</Number>
+    </Dial>
+</Response>`);
             return;
         }
 
+        // ── Inbound PSTN call ──────────────────────────────────────────────
         const sipEndpointError = validateSipEndpoint(sipEndpoint);
         if (sipEndpointError) {
-            console.error(`${sipEndpointError} Cannot route inbound calls.`);
+            console.error(sipEndpointError);
             sendXml(res, buildConfigErrorResponseXml(sipEndpointError));
             return;
         }
 
+        const inboundCallUuid = params.CallUUID || '';
         const normalizedCaller =
             rawFrom && !rawFrom.startsWith('+') && !rawFrom.startsWith('sip:')
                 ? `+${rawFrom}`
                 : rawFrom || 'Unknown';
 
-        console.log(`Inbound PSTN call from ${normalizedCaller} -> routing to ${sipEndpoint}`);
+        console.log(`Inbound PSTN from ${normalizedCaller} -> ${sipEndpoint}`);
 
-        const xmlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+        // Conference mode: put PSTN in a room. Flutter polls /pending-call to detect
+        // the incoming call, then joins the room via an outbound SIP call — same
+        // WebRTC path as outbound calls, so ICE works reliably.
+        if (vobizAccountSid && vobizAuthToken && publicUrl) {
+            const roomId = `vi_${Date.now()}`;
+            activeCall = {
+                roomId,
+                sdkCallSid:    null,
+                pstnNumber:    normalizedCaller,
+                pstnCallUuid:  inboundCallUuid,
+                pendingInbound: true,   // cleared when Flutter joins via /answer
+            };
+            console.log(`[inbound-conf] PSTN waiting in room ${roomId}, caller: ${normalizedCaller}`);
+
+            sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Speak>Please wait while we connect your call.</Speak>
+    <Conference stayAlone="true">${escapeXml(roomId)}</Conference>
+</Response>`);
+            return;
+        }
+
+        // Fallback: direct SIP dial (conference credentials not set; hold/transfer unavailable)
+        sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Dial callerId="${escapeXml(callerId)}" timeout="30">
         <User>${escapeXml(sipEndpoint)}</User>
     </Dial>
     <Speak>The call could not be connected right now. Please try again in a moment.</Speak>
-</Response>`;
-
-        sendXml(res, xmlResponse);
+</Response>`);
     });
 });
 
 server.listen(port, () => {
+    const confMode = vobizAccountSid && vobizAuthToken && publicUrl
+        ? '✓ Conference mode active (hold announcement enabled)'
+        : '⚠  Standard mode (add VOBIZ_ACCOUNT_SID, VOBIZ_AUTH_TOKEN, PUBLIC_URL for hold announcement)';
+
     console.log(`
 -------------------------------------------------------
-  Vobiz Backend running on port ${port}
+  Vobiz Backend  →  port ${port}
 -------------------------------------------------------
-  Frontend (Web UI):
-     http://localhost:${port}/client/index.html
+  Mode: ${confMode}
 
   Flutter outbound helper:
      POST http://127.0.0.1:${port}/call
 
-  Vobiz Answer URL:
+  Vobiz Answer URL (set in Vobiz console):
      https://<your-ngrok-url>/answer
 
-  Required .env values:
-     CALLER_ID=+918046733542
-     SIP_ENDPOINT=sip:your-endpoint-username@registrar.vobiz.ai
+  Hold announcement URL (auto-used when holding):
+     https://<your-ngrok-url>/hold-announcement
 
-  Behavior:
-     - App POST /call stores the outbound destination
-     - /answer returns <Number> for SDK outbound calls
-     - /answer returns <User> for inbound PSTN calls
+  Required .env:
+     CALLER_ID          = +918046733542
+     SIP_ENDPOINT       = sip:username@registrar.vobiz.ai
+
+  Optional (for hold announcement):
+     VOBIZ_ACCOUNT_SID  = from Vobiz dashboard → API Keys
+     VOBIZ_AUTH_TOKEN   = from Vobiz dashboard → API Keys
+     PUBLIC_URL         = https://your-ngrok-url
 -------------------------------------------------------
     `);
 });

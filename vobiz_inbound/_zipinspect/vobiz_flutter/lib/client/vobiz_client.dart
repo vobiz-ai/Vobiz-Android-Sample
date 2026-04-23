@@ -18,7 +18,7 @@ enum ClientConnectionState { disconnected, connecting, connected }
 
 enum RegistrationState { unregistered, registering, registered, failed }
 
-enum CallState { idle, calling, incoming, ringing, inCall, ended }
+enum CallState { idle, calling, incoming, ringing, inCall, held, transferring, warmTransfer, ended }
 
 // ---------------------------------------------------------------------------
 // Immutable state snapshot
@@ -30,6 +30,13 @@ class VobizState {
   final CallState call;
   final String? callerId;
   final String? errorMessage;
+  final bool isMuted;
+  final bool isHeld;
+  final bool isConference;
+  final String? addedCallNumber;
+  final bool hasSecondCall;
+  final String? secondCallNumber;
+  final bool firstCallActive;
 
   const VobizState({
     this.connection = ClientConnectionState.disconnected,
@@ -37,6 +44,13 @@ class VobizState {
     this.call = CallState.idle,
     this.callerId,
     this.errorMessage,
+    this.isMuted = false,
+    this.isHeld = false,
+    this.isConference = false,
+    this.addedCallNumber,
+    this.hasSecondCall = false,
+    this.secondCallNumber,
+    this.firstCallActive = true,
   });
 
   VobizState copyWith({
@@ -47,6 +61,15 @@ class VobizState {
     String? errorMessage,
     bool clearError = false,
     bool clearCaller = false,
+    bool? isMuted,
+    bool? isHeld,
+    bool? isConference,
+    String? addedCallNumber,
+    bool clearAddedCall = false,
+    bool? hasSecondCall,
+    String? secondCallNumber,
+    bool clearSecondCall = false,
+    bool? firstCallActive,
   }) {
     return VobizState(
       connection: connection ?? this.connection,
@@ -54,6 +77,13 @@ class VobizState {
       call: call ?? this.call,
       callerId: clearCaller ? null : (callerId ?? this.callerId),
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
+      isMuted: isMuted ?? this.isMuted,
+      isHeld: isHeld ?? this.isHeld,
+      isConference: isConference ?? this.isConference,
+      addedCallNumber: clearAddedCall ? null : (addedCallNumber ?? this.addedCallNumber),
+      hasSecondCall: clearSecondCall ? false : (hasSecondCall ?? this.hasSecondCall),
+      secondCallNumber: clearSecondCall ? null : (secondCallNumber ?? this.secondCallNumber),
+      firstCallActive: firstCallActive ?? this.firstCallActive,
     );
   }
 }
@@ -80,6 +110,9 @@ class VobizClient {
   final _stateController = StreamController<VobizState>.broadcast();
   VobizState _state = const VobizState();
   Timer? _callSetupTimer;
+  Timer? _inboundPollTimer;
+  String? _pendingInboundCaller;
+  String? _pendingInboundJoinNumber;
 
   VobizState get state => _state;
   Stream<VobizState> get stream => _stateController.stream;
@@ -125,6 +158,7 @@ class VobizClient {
 
   Future<void> disconnect() async {
     _clearCallSetupTimer();
+    _stopInboundPolling();
     await _peer.disposeAll();
     _sip.disconnect();
     _emit(const VobizState());
@@ -191,18 +225,17 @@ class VobizClient {
       return;
     }
 
+    if (_pendingInboundCaller != null) {
+      await _answerInboundConference();
+      return;
+    }
+
     try {
-      print('📞 [ANSWER] Creating answer from stored offer...');
       final answerSdp = await _peer.createAnswerFromStoredOffer();
-      print('📞 [ANSWER] Answer SDP created, length: ${answerSdp.length}');
-      print('📞 [ANSWER] Sending SIP answer...');
       _sip.answer(answerSdp);
-      print('📞 [ANSWER] SIP answer sent, call should be connected!');
       _emit(_state.copyWith(call: CallState.inCall, clearCaller: true));
     } catch (e, stack) {
-      Log.error('Client', 'Answer failed: $e');
-      print('❌ [ANSWER] Error: $e');
-      print('❌ [ANSWER] Stack: $stack');
+      Log.error('Client', 'Answer failed: $e\n$stack');
       _sip.reject();
       await _peer.dispose();
       _emit(
@@ -221,9 +254,84 @@ class VobizClient {
       return;
     }
 
+    _pendingInboundCaller = null;
     _sip.reject();
     await _peer.dispose();
     _emit(_state.copyWith(call: CallState.idle, clearCaller: true));
+  }
+
+  Future<void> _answerInboundConference() async {
+    _pendingInboundCaller = null;
+    final joinTarget = _pendingInboundJoinNumber?.isNotEmpty == true
+        ? _pendingInboundJoinNumber!
+        : (_appDialNumber.isNotEmpty
+            ? _formatDestination(_appDialNumber)
+            : _vobizPhoneNumber);
+    _pendingInboundJoinNumber = null;
+
+    _emit(_state.copyWith(call: CallState.calling, clearError: true));
+
+    try {
+      if (joinTarget.isEmpty) {
+        throw StateError('No join target — CALLER_ID not configured on server');
+      }
+
+      await _peer.createPeerConnection();
+      await _peer.attachLocalAudioStream();
+      final sdp = await _peer.createOffer();
+
+      await BackendService.answerInbound();
+
+      Log.info('Client', 'Joining inbound conference via $joinTarget');
+      _sip.call(joinTarget, sdp);
+      _startCallSetupTimer();
+    } catch (e) {
+      Log.error('Client', 'Inbound conference join failed: $e');
+      _clearCallSetupTimer();
+      await _peer.dispose();
+      _emit(_state.copyWith(
+        call: CallState.idle,
+        errorMessage: 'Failed to join call',
+        clearCaller: true,
+      ));
+    }
+  }
+
+  void _startInboundPolling() {
+    _stopInboundPolling();
+    _inboundPollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      if (_state.registration != RegistrationState.registered) { return; }
+
+      try {
+        final result = await BackendService.getPendingCall();
+
+        // If showing incoming screen but PSTN hung up → go back to idle
+        if (_state.call == CallState.incoming && _pendingInboundCaller != null) {
+          if (result == null || result['pending'] != true) {
+            _pendingInboundCaller = null;
+            _pendingInboundJoinNumber = null;
+            _emit(_state.copyWith(call: CallState.idle, clearCaller: true));
+          }
+          return;
+        }
+
+        if (_state.call != CallState.idle) { return; }
+        if (result == null || result['pending'] != true) { return; }
+
+        _pendingInboundCaller = result['caller'] as String? ?? 'Unknown';
+        _pendingInboundJoinNumber = result['joinNumber'] as String? ?? '';
+        Log.info('Client', 'Inbound call detected from $_pendingInboundCaller');
+        _emit(_state.copyWith(
+          call: CallState.incoming,
+          callerId: _pendingInboundCaller,
+        ));
+      } catch (_) {}
+    });
+  }
+
+  void _stopInboundPolling() {
+    _inboundPollTimer?.cancel();
+    _inboundPollTimer = null;
   }
 
   Future<void> hangup() async {
@@ -236,7 +344,239 @@ class VobizClient {
     _clearCallSetupTimer();
     _sip.hangup();
     await _peer.dispose();
-    _emit(_state.copyWith(call: CallState.idle, clearCaller: true));
+    _emit(_state.copyWith(
+      call: CallState.idle,
+      clearCaller: true,
+      isMuted: false,
+      isHeld: false,
+      isConference: false,
+      clearAddedCall: true,
+      clearSecondCall: true,
+      firstCallActive: true,
+    ));
+  }
+
+  Future<void> mute() async {
+    if (_state.call != CallState.inCall) return;
+    await _peer.setMuted(true);
+    _emit(_state.copyWith(isMuted: true));
+  }
+
+  Future<void> unmute() async {
+    if (_state.call != CallState.inCall) return;
+    await _peer.setMuted(false);
+    _emit(_state.copyWith(isMuted: false));
+  }
+
+  Future<void> hold() async {
+    if (_state.call != CallState.inCall) return;
+    await _peer.setMuted(true);
+    _emit(_state.copyWith(call: CallState.held, isHeld: true, isMuted: true));
+    // Tell backend to play hold announcement to the PSTN caller.
+    BackendService.holdCall();
+  }
+
+  Future<void> resume() async {
+    if (_state.call != CallState.held) return;
+    await _peer.setMuted(false);
+    _emit(_state.copyWith(call: CallState.inCall, isHeld: false, isMuted: false));
+    // Tell backend to remove hold announcement from the PSTN caller.
+    BackendService.resumeCall();
+  }
+
+  /// Blind transfer: redirect the PSTN caller to [destination] and hang up
+  /// the local SIP session. [destination] may be an E.164 number (+91...)
+  /// or a full SIP URI (sip:user@domain).
+  Future<void> transfer(String destination) async {
+    if (_state.call != CallState.inCall && _state.call != CallState.held) {
+      Log.warn('Client', 'transfer() ignored - not in call');
+      return;
+    }
+
+    final target = destination.trim();
+    if (target.isEmpty) {
+      _emit(_state.copyWith(errorMessage: 'Enter a transfer destination first'));
+      return;
+    }
+
+    _emit(_state.copyWith(call: CallState.transferring, clearError: true));
+
+    try {
+      await BackendService.transferCall(target);
+      Log.info('Client', 'Transfer to $target initiated ✓');
+    } catch (e) {
+      Log.error('Client', 'Transfer failed: $e');
+      _emit(_state.copyWith(
+        call: CallState.inCall,
+        errorMessage: 'Transfer failed — check the destination and try again',
+      ));
+      return;
+    }
+
+    // PSTN is now redirected. End our local SIP session cleanly.
+    _clearCallSetupTimer();
+    _sip.hangup();
+    await _peer.dispose();
+    _emit(_state.copyWith(
+      call: CallState.idle,
+      clearCaller: true,
+      isMuted: false,
+      isHeld: false,
+    ));
+  }
+
+  /// Option B — start a second separate call.
+  /// Puts PSTN1 on hold, dials PSTN2 into the same conference room.
+  /// Agent talks privately to PSTN2. Can swap or merge at any time.
+  Future<void> startSecondCall(String destination) async {
+    if (_state.call != CallState.inCall) {
+      Log.warn('Client', 'startSecondCall() ignored - not in call');
+      return;
+    }
+    if (_state.hasSecondCall) {
+      Log.warn('Client', 'startSecondCall() ignored - second call already active');
+      return;
+    }
+
+    final target = destination.trim();
+    if (target.isEmpty) {
+      _emit(_state.copyWith(errorMessage: 'Enter a number to call'));
+      return;
+    }
+
+    try {
+      await BackendService.startSecondCall(target);
+      Log.info('Client', 'Second call to $target initiated ✓');
+      _emit(_state.copyWith(
+        hasSecondCall: true,
+        secondCallNumber: target,
+        firstCallActive: false,
+        clearError: true,
+      ));
+    } catch (e) {
+      Log.error('Client', 'Second call failed: $e');
+      _emit(_state.copyWith(
+        errorMessage: 'Could not start second call — check the number',
+      ));
+    }
+  }
+
+  /// Option B — swap which call is active (in conference) vs on hold.
+  Future<void> swapCalls() async {
+    if (!_state.hasSecondCall) return;
+    BackendService.swapCalls();
+    _emit(_state.copyWith(firstCallActive: !_state.firstCallActive));
+  }
+
+  /// Option B — merge both calls into the conference simultaneously.
+  /// Both PSTN legs join the room; agent stays on.
+  Future<void> mergeCalls() async {
+    if (!_state.hasSecondCall) return;
+    try {
+      await BackendService.mergeCalls();
+      Log.info('Client', 'Calls merged into conference ✓');
+      _emit(_state.copyWith(
+        hasSecondCall: false,
+        clearSecondCall: true,
+        isConference: true,
+        addedCallNumber: _state.secondCallNumber,
+        firstCallActive: true,
+        clearError: true,
+      ));
+    } catch (e) {
+      Log.error('Client', 'Merge failed: $e');
+      _emit(_state.copyWith(errorMessage: 'Merge failed — try again'));
+    }
+  }
+
+  /// Option B — end the second call and resume the first.
+  Future<void> endSecondCall() async {
+    if (!_state.hasSecondCall) return;
+    BackendService.endSecondCall();
+    _emit(_state.copyWith(
+      hasSecondCall: false,
+      clearSecondCall: true,
+      firstCallActive: true,
+    ));
+  }
+
+  /// Add call: dial a new party into the existing conference room.
+  /// All three (agent, PSTN caller, added party) can hear each other.
+  Future<void> addCall(String destination) async {
+    if (_state.call != CallState.inCall) {
+      Log.warn('Client', 'addCall() ignored - not in call');
+      return;
+    }
+    if (_state.isConference) {
+      Log.warn('Client', 'addCall() ignored - conference already active');
+      return;
+    }
+
+    final target = destination.trim();
+    if (target.isEmpty) {
+      _emit(_state.copyWith(errorMessage: 'Enter a number to add'));
+      return;
+    }
+
+    try {
+      await BackendService.addCall(target);
+      Log.info('Client', 'Add call to $target initiated ✓');
+      _emit(_state.copyWith(
+        isConference: true,
+        addedCallNumber: target,
+        clearError: true,
+      ));
+    } catch (e) {
+      Log.error('Client', 'Add call failed: $e');
+      _emit(_state.copyWith(
+        errorMessage: 'Could not add call — check the number and try again',
+      ));
+    }
+  }
+
+  /// Remove the added party from the conference, returning to a 2-party call.
+  Future<void> removeAddedCall() async {
+    if (!_state.isConference) return;
+    BackendService.removeAddedCall();
+    _emit(_state.copyWith(isConference: false, clearAddedCall: true));
+  }
+
+  /// Warm transfer step 1: dial the target into the existing conference
+  /// creating a 3-way call. Agent can consult before completing.
+  Future<void> warmTransferStart(String destination) async {
+    if (_state.call != CallState.inCall && _state.call != CallState.held) {
+      Log.warn('Client', 'warmTransferStart() ignored - not in call');
+      return;
+    }
+
+    final target = destination.trim();
+    if (target.isEmpty) {
+      _emit(_state.copyWith(errorMessage: 'Enter a transfer destination first'));
+      return;
+    }
+
+    _emit(_state.copyWith(call: CallState.warmTransfer, clearError: true));
+
+    try {
+      await BackendService.warmTransferStart(target);
+      Log.info('Client', 'Warm transfer started — target $target joining conference');
+    } catch (e) {
+      Log.error('Client', 'Warm transfer start failed: $e');
+      _emit(_state.copyWith(
+        call: CallState.inCall,
+        errorMessage: 'Could not reach transfer target — check the number',
+      ));
+    }
+  }
+
+  /// Warm transfer step 2: agent hangs up, leaving PSTN + target in conference.
+  Future<void> warmTransferComplete() async {
+    if (_state.call != CallState.warmTransfer) {
+      Log.warn('Client', 'warmTransferComplete() ignored - not in warmTransfer state');
+      return;
+    }
+    Log.info('Client', 'Completing warm transfer — dropping off conference');
+    await hangup();
   }
 
   Future<void> dispose() async {
@@ -254,6 +594,7 @@ class VobizClient {
           clearError: true,
         ),
       );
+      _startInboundPolling();
     };
 
     _sip.onRegistrationFailed = (reason) {
@@ -337,7 +678,16 @@ class VobizClient {
     _sip.onCallEnded = () async {
       _clearCallSetupTimer();
       await _peer.dispose();
-      _emit(_state.copyWith(call: CallState.idle, clearCaller: true));
+      _emit(_state.copyWith(
+        call: CallState.idle,
+        clearCaller: true,
+        isMuted: false,
+        isHeld: false,
+        isConference: false,
+        clearAddedCall: true,
+        clearSecondCall: true,
+        firstCallActive: true,
+      ));
     };
 
     _sip.onCallFailed = (reason) async {
@@ -348,6 +698,12 @@ class VobizClient {
           call: CallState.idle,
           errorMessage: reason,
           clearCaller: true,
+          isMuted: false,
+          isHeld: false,
+          isConference: false,
+          clearAddedCall: true,
+          clearSecondCall: true,
+          firstCallActive: true,
         ),
       );
     };

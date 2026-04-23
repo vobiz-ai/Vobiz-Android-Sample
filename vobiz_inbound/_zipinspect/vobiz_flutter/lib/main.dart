@@ -60,7 +60,10 @@ class _VobizAppState extends State<VobizApp> {
 
     if (state.call == CallState.inCall ||
         state.call == CallState.calling ||
-        state.call == CallState.ringing) {
+        state.call == CallState.ringing ||
+        state.call == CallState.held ||
+        state.call == CallState.transferring ||
+        state.call == CallState.warmTransfer) {
       return InCallScreen(client: client);
     }
 
