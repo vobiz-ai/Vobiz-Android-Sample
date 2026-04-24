@@ -3,16 +3,17 @@ import 'package:vobiz_webrtc/vobiz_webrtc.dart';
 class SdkFactory {
   const SdkFactory();
 
-  static const _answerUrl = String.fromEnvironment(
-    'VOBIZ_ANSWER_URL',
-    defaultValue: 'https://example.com/answer',
+  static const _backendUrl = String.fromEnvironment(
+    'VOBIZ_BACKEND_URL',
+    defaultValue: 'http://127.0.0.1:3000',
   );
 
   VobizClient createClient() {
     return VobizClient(
       config: const SdkConfig(
-        socketUrl: 'wss://sip.vobiz.ai:7443',
-        answerUrl: _answerUrl,
+        wsUrl: 'wss://registrar.vobiz.ai:5063/',
+        sipServer: 'registrar.vobiz.ai',
+        backendUrl: _backendUrl,
         autoReconnect: true,
         debug: true,
       ),

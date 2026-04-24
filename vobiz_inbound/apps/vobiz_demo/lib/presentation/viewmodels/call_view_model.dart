@@ -85,7 +85,7 @@ class CallViewModel extends ChangeNotifier {
   String? get activeCallId => activeCall?.callId;
   String? get heldCallId => heldCall?.callId;
 
-  bool get isMuted => activeCall?.isMuted ?? false;
+  bool get isMuted => _isMuted;
   bool get canHangup =>
       activeCall != null || heldCall != null || _incomingCall != null;
 
@@ -106,6 +106,7 @@ class CallViewModel extends ChangeNotifier {
   }
 
   bool isIncomingRinging = false;
+  bool _isMuted = false;
   CallEvent? latestCallEvent;
 
   // Track which call IDs came from inbound (incoming) legs.
@@ -228,16 +229,14 @@ class CallViewModel extends ChangeNotifier {
 
   /// Merges the active and held calls into a conference.
   Future<void> mergeConference() async {
-    final String? a = activeCallId;
-    final String? h = heldCallId;
-    if (a == null || h == null) return;
+    if (!canMerge) return;
 
     isBusy = true;
     errorMessage = null;
     notifyListeners();
 
     try {
-      await client.mergeConference(a, h);
+      await client.mergeCalls();
     } catch (error) {
       errorMessage = error.toString();
     } finally {
@@ -251,11 +250,14 @@ class CallViewModel extends ChangeNotifier {
     final String? id = activeCallId;
     if (id == null) return;
     try {
-      if (isMuted) {
+      if (_isMuted) {
         await client.unmute(id);
+        _isMuted = false;
       } else {
         await client.mute(id);
+        _isMuted = true;
       }
+      notifyListeners();
     } catch (error) {
       errorMessage = error.toString();
       notifyListeners();
@@ -298,26 +300,29 @@ class CallViewModel extends ChangeNotifier {
   void _onCallEvent(CallEvent event) {
     latestCallEvent = event;
 
-    // Track inbound call IDs so we can distinguish them from outbound legs.
-    final dynamic session = event.session;
-    final bool incoming = session?.isIncoming as bool? ?? false;
-    if (incoming) _incomingCallIds.add(event.callId);
-
-    final String? muted =
-        (session?.muted as bool? ?? false) ? 'true' : null;
+    // Incoming state means this is an inbound leg.
+    if (event.state == CallStateStatus.incoming) {
+      _incomingCallIds.add(event.callId);
+    }
 
     if (event.state == CallStateStatus.ended ||
         event.state == CallStateStatus.failed) {
       _calls.remove(event.callId);
       _incomingCallIds.remove(event.callId);
+      _isMuted = false;
     } else {
+      // For inbound legs use event.message (e.g. "Inbound from +91...").
+      // For outbound use the destination the user typed.
+      final bool isInbound = _incomingCallIds.contains(event.callId);
+      final String identity =
+          isInbound && (event.message?.isNotEmpty ?? false)
+              ? event.message!
+              : destination.trim();
       _calls[event.callId] = CallInfo(
         callId: event.callId,
-        remoteIdentity: (session?.remoteIdentity as String?)?.isNotEmpty == true
-            ? session!.remoteIdentity as String
-            : destination.trim(),
+        remoteIdentity: identity,
         state: event.state,
-        isMuted: muted != null,
+        isMuted: _isMuted,
       );
     }
 
