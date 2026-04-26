@@ -5,7 +5,7 @@ class SdkFactory {
 
   static const _backendUrl = String.fromEnvironment(
     'VOBIZ_BACKEND_URL',
-    defaultValue: 'http://127.0.0.1:3000',
+    defaultValue: 'http://10.0.2.2:3000',
   );
 
   VobizClient createClient() {
