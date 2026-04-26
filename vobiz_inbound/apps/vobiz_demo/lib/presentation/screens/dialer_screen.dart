@@ -206,12 +206,12 @@ class _DialerScreenState extends State<DialerScreen> {
   }
 
   Future<void> _showNumberDialog({
-    required BuildContext context,
     required String title,
     required String hint,
     required String confirmLabel,
     required void Function(String) onConfirm,
   }) async {
+    if (!mounted) return;
     final TextEditingController controller = TextEditingController();
     await showDialog<void>(
       context: context,
@@ -308,7 +308,6 @@ class _DialerScreenState extends State<DialerScreen> {
                       : () => _callViewModel.holdActiveCall(),
                   onMerge: () => _callViewModel.mergeConference(),
                   onAddCall: () => _showNumberDialog(
-                    context: context,
                     title: 'Add Call',
                     hint: 'Number to add',
                     confirmLabel: 'Add',
@@ -316,7 +315,6 @@ class _DialerScreenState extends State<DialerScreen> {
                         _callViewModel.addCallTo(number),
                   ),
                   onTransfer: () => _showNumberDialog(
-                    context: context,
                     title: 'Transfer Call',
                     hint: 'Transfer to number',
                     confirmLabel: 'Transfer',
