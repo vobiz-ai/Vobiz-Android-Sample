@@ -186,6 +186,35 @@ class CallViewModel extends ChangeNotifier {
     }
   }
 
+  /// Blind-transfers the active call to [to].
+  Future<void> transferCall(String to) async {
+    if (to.trim().isEmpty) return;
+    errorMessage = null;
+    notifyListeners();
+    try {
+      await client.transfer(to.trim());
+    } catch (error) {
+      errorMessage = error.toString();
+      notifyListeners();
+    }
+  }
+
+  /// Adds [to] as a third party to the current call.
+  Future<void> addCallTo(String to) async {
+    if (to.trim().isEmpty) return;
+    isBusy = true;
+    errorMessage = null;
+    notifyListeners();
+    try {
+      await client.addCall(to.trim());
+    } catch (error) {
+      errorMessage = error.toString();
+    } finally {
+      isBusy = false;
+      notifyListeners();
+    }
+  }
+
   /// Hangs up every live call leg.
   Future<void> hangup() async {
     final List<String> ids = _calls.keys.toList();

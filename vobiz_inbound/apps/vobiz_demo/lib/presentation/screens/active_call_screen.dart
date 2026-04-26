@@ -17,6 +17,8 @@ class ActiveCallScreen extends StatelessWidget {
     required this.onToggleMute,
     required this.onHold,
     required this.onMerge,
+    required this.onAddCall,
+    required this.onTransfer,
     required this.onHangup,
     this.heldRemoteIdentity,
   });
@@ -34,6 +36,8 @@ class ActiveCallScreen extends StatelessWidget {
   final VoidCallback onToggleMute;
   final VoidCallback onHold;
   final VoidCallback onMerge;
+  final VoidCallback onAddCall;
+  final VoidCallback onTransfer;
   final VoidCallback onHangup;
 
   /// The identity of the person on hold, shown in the banner.
@@ -109,6 +113,8 @@ class ActiveCallScreen extends StatelessWidget {
                       onToggleMute: onToggleMute,
                       onHold: onHold,
                       onMerge: onMerge,
+                      onAddCall: onAddCall,
+                      onTransfer: onTransfer,
                       onHangup: onHangup,
                     ),
                     const SizedBox(height: 32),

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 /// Reusable controls shown on the active call screen.
 ///
-/// Displays Mute, Hold, Merge (when a second call is held), and Hangup buttons.
+/// Displays Mute, Hold, Add Call, Transfer, Merge (when held), and Hangup.
 class CallControls extends StatelessWidget {
   const CallControls({
     super.key,
@@ -12,20 +12,20 @@ class CallControls extends StatelessWidget {
     this.onToggleMute,
     this.onHold,
     this.onMerge,
+    this.onAddCall,
+    this.onTransfer,
     this.onHangup,
   });
 
   final bool isMuted;
-
-  /// Whether the current call is held (shows Resume instead of Hold).
   final bool isHeld;
-
-  /// Whether a second held call exists and merge is possible.
   final bool canMerge;
 
   final VoidCallback? onToggleMute;
   final VoidCallback? onHold;
   final VoidCallback? onMerge;
+  final VoidCallback? onAddCall;
+  final VoidCallback? onTransfer;
   final VoidCallback? onHangup;
 
   @override
@@ -33,7 +33,7 @@ class CallControls extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        // First row: Mute · Hold/Resume · Merge
+        // Row 1: Mute · Hold/Resume · Merge
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: <Widget>[
@@ -68,8 +68,30 @@ class CallControls extends StatelessWidget {
             ],
           ],
         ),
+        const SizedBox(height: 16),
+        // Row 2: Add Call · Transfer
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            _ControlButton(
+              icon: Icons.add_call,
+              label: 'Add Call',
+              onPressed: onAddCall,
+              backgroundColor: const Color(0xFFE9EEF5),
+              foregroundColor: Colors.black87,
+            ),
+            const SizedBox(width: 16),
+            _ControlButton(
+              icon: Icons.call_made,
+              label: 'Transfer',
+              onPressed: onTransfer,
+              backgroundColor: const Color(0xFFE9EEF5),
+              foregroundColor: Colors.black87,
+            ),
+          ],
+        ),
         const SizedBox(height: 20),
-        // Second row: Hangup (centred, prominent)
+        // Row 3: Hangup
         _ControlButton(
           icon: Icons.call_end,
           label: 'Hangup',

@@ -68,9 +68,10 @@ class _DialerScreenState extends State<DialerScreen> {
             actions: <Widget>[
               TextButton(
                 onPressed: () async {
+                  final NavigatorState nav = Navigator.of(context);
                   await sdkViewModel.disconnect();
                   if (!mounted) return;
-                  Navigator.of(context).pop();
+                  nav.pop();
                 },
                 child: const Text('Logout'),
               ),
@@ -204,6 +205,45 @@ class _DialerScreenState extends State<DialerScreen> {
     );
   }
 
+  Future<void> _showNumberDialog({
+    required BuildContext context,
+    required String title,
+    required String hint,
+    required String confirmLabel,
+    required void Function(String) onConfirm,
+  }) async {
+    final TextEditingController controller = TextEditingController();
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.phone,
+          autofocus: true,
+          decoration: InputDecoration(
+            hintText: hint,
+            border: const OutlineInputBorder(),
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              onConfirm(controller.text.trim());
+            },
+            child: Text(confirmLabel),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+  }
+
   void _handleCallUiTransitions() {
     final bool shouldShowIncomingPopup = _callViewModel.isIncomingRinging;
     final bool shouldShowCallScreen =
@@ -267,6 +307,22 @@ class _DialerScreenState extends State<DialerScreen> {
                       ? () => _callViewModel.resumeHeldCall()
                       : () => _callViewModel.holdActiveCall(),
                   onMerge: () => _callViewModel.mergeConference(),
+                  onAddCall: () => _showNumberDialog(
+                    context: context,
+                    title: 'Add Call',
+                    hint: 'Number to add',
+                    confirmLabel: 'Add',
+                    onConfirm: (String number) =>
+                        _callViewModel.addCallTo(number),
+                  ),
+                  onTransfer: () => _showNumberDialog(
+                    context: context,
+                    title: 'Transfer Call',
+                    hint: 'Transfer to number',
+                    confirmLabel: 'Transfer',
+                    onConfirm: (String number) =>
+                        _callViewModel.transferCall(number),
+                  ),
                   onHangup: () async {
                     final String? id = _callViewModel.activeCallId;
                     if (id != null) await _callViewModel.hangupCall(id);
