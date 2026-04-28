@@ -1,0 +1,22 @@
+# Credentials & secrets
+**/.env
+**/.env.local
+**/.env.production
+**/serviceAccountKey.json
+**/google-services.json
+**/GoogleService-Info.plist
+
+# Flutter/Dart
+**/.dart_tool/
+**/build/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/pubspec.lock
+
+# Node
+**/node_modules/
+**/npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
