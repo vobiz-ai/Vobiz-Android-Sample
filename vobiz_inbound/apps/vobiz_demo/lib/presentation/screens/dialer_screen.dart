@@ -1,18 +1,13 @@
 import 'package:flutter/material.dart';
 
+import '../../app.dart';
 import '../../integration/dependency_injection.dart';
 import '../viewmodels/call_view_model.dart';
 import '../viewmodels/sdk_view_model.dart';
+import '../widgets/vobiz_logo.dart';
 import 'active_call_screen.dart';
 import 'incoming_call_screen.dart';
 
-/// Second screen of the demo app.
-///
-/// Handles the full multi-call flow:
-///   - outbound calls via the dialpad
-///   - "Add Call" when a call is already held (second leg for conference)
-///   - hold / resume / merge controls forwarded from [ActiveCallScreen]
-///   - incoming call popup (unchanged)
 class DialerScreen extends StatefulWidget {
   const DialerScreen({super.key});
 
@@ -32,8 +27,7 @@ class _DialerScreenState extends State<DialerScreen> {
     super.didChangeDependencies();
     if (_initialized) return;
 
-    final SdkViewModel sdkViewModel =
-        DependencyInjection.of(context).sdkViewModel;
+    final SdkViewModel sdkViewModel = DependencyInjection.of(context);
     _callViewModel = CallViewModel(sdkViewModel.client);
     _numberController = TextEditingController();
     _callViewModel.addListener(_syncTextField);
@@ -50,21 +44,31 @@ class _DialerScreenState extends State<DialerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final SdkViewModel sdkViewModel =
-        DependencyInjection.of(context).sdkViewModel;
+    final SdkViewModel sdkViewModel = DependencyInjection.of(context);
 
     return AnimatedBuilder(
-      animation:
-          Listenable.merge(<Listenable>[sdkViewModel, _callViewModel]),
+      animation: Listenable.merge(<Listenable>[sdkViewModel, _callViewModel]),
       builder: (BuildContext context, _) {
         _handleCallUiTransitions();
 
         final bool hasHeld = _callViewModel.hasHeldCall;
 
         return Scaffold(
-          backgroundColor: const Color(0xFFF3F5F8),
           appBar: AppBar(
-            title: const Text('Dialer'),
+            title: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: const <Widget>[
+                VobizLogo(width: 32),
+                SizedBox(width: 10),
+                Text(
+                  'Dialer',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 18,
+                  ),
+                ),
+              ],
+            ),
             actions: <Widget>[
               TextButton(
                 onPressed: () async {
@@ -82,56 +86,83 @@ class _DialerScreenState extends State<DialerScreen> {
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 480),
                 child: ListView(
-                  padding: const EdgeInsets.all(24),
+                  padding: const EdgeInsets.all(20),
                   children: <Widget>[
-                    _InfoPanel(
-                      title: 'SDK Connection',
-                      body: sdkViewModel.connectionEvent == null
-                          ? 'Disconnected'
-                          : '${sdkViewModel.connectionEvent!.connectionState.name} / '
-                              '${sdkViewModel.connectionEvent!.registrationState.name}',
+                    // Status row
+                    Row(
+                      children: <Widget>[
+                        Expanded(
+                          child: _StatusChip(
+                            label: 'Network',
+                            value: sdkViewModel.connectionEvent == null
+                                ? 'Disconnected'
+                                : sdkViewModel
+                                    .connectionEvent!.connectionState.name,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: _StatusChip(
+                            label: 'SIP',
+                            value: sdkViewModel.connectionEvent == null
+                                ? '—'
+                                : sdkViewModel
+                                    .connectionEvent!.registrationState.name,
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 10),
+
+                    // Call status panel
                     _InfoPanel(
                       title: 'Call Status',
                       body: _callViewModel.activeCall == null
                           ? 'No active call'
                           : '${_callViewModel.activeCall!.state.name}'
-                              ' | ${_callViewModel.activeCall!.remoteIdentity}',
+                              ' · ${_callViewModel.activeCall!.remoteIdentity}',
                     ),
 
-                    // Held-call info panel — visible when a call is parked.
                     if (hasHeld) ...<Widget>[
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 10),
                       _HeldCallPanel(
                         identity: _callViewModel.heldRemoteIdentity,
                         onResume: _callViewModel.resumeHeldCall,
                       ),
                     ],
 
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 20),
 
+                    // Number field
                     TextField(
                       controller: _numberController,
                       keyboardType: TextInputType.phone,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 1.5,
+                      ),
+                      textAlign: TextAlign.center,
                       decoration: InputDecoration(
                         labelText: hasHeld
                             ? 'Enter number for second call'
                             : 'Enter Number',
-                        hintText: 'Destination number',
-                        border: const OutlineInputBorder(),
+                        hintText: '+1 (555) 000-0000',
                         prefixIcon: const Icon(Icons.dialpad_rounded),
                       ),
                       onChanged: _callViewModel.setDestination,
                     ),
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 16),
+
+                    // Dial pad
                     _DialPad(
                       onKeyTap: _callViewModel.appendDigit,
                       onBackspace: _callViewModel.backspace,
                     ),
                     const SizedBox(height: 20),
 
-                    // Primary call button — changes to "Add Call" when a call is held.
+                    // Call / Add Call button
                     SizedBox(
                       width: double.infinity,
                       child: FilledButton.icon(
@@ -141,6 +172,13 @@ class _DialerScreenState extends State<DialerScreen> {
                             : hasHeld
                                 ? _callViewModel.addCallToConference
                                 : _callViewModel.makeCall,
+                        style: FilledButton.styleFrom(
+                          padding:
+                              const EdgeInsets.symmetric(vertical: 18),
+                          backgroundColor: hasHeld
+                              ? VobizDemoApp.kGreen
+                              : VobizDemoApp.kOrange,
+                        ),
                         icon: _callViewModel.isBusy
                             ? const SizedBox(
                                 width: 18,
@@ -151,38 +189,54 @@ class _DialerScreenState extends State<DialerScreen> {
                                 ),
                               )
                             : Icon(
-                                hasHeld ? Icons.call_merge : Icons.call,
-                              ),
-                        label: Text(hasHeld ? 'Add Call' : 'Call'),
-                        style: FilledButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 18),
-                          backgroundColor:
-                              hasHeld ? const Color(0xFF16A34A) : null,
+                                hasHeld ? Icons.call_merge : Icons.call),
+                        label: Text(
+                          hasHeld ? 'Add Call' : 'Call',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 10),
 
+                    // End all calls
                     SizedBox(
                       width: double.infinity,
                       child: OutlinedButton.icon(
                         onPressed: _callViewModel.canHangup
                             ? _callViewModel.hangup
                             : null,
-                        icon: const Icon(Icons.call_end),
-                        label: const Text('End All Calls'),
                         style: OutlinedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 18),
+                          padding:
+                              const EdgeInsets.symmetric(vertical: 18),
+                          foregroundColor: VobizDemoApp.kRed,
+                          side: BorderSide(
+                            color: _callViewModel.canHangup
+                                ? VobizDemoApp.kRed
+                                : VobizDemoApp.kBorder,
+                          ),
+                        ),
+                        icon: const Icon(Icons.call_end),
+                        label: const Text(
+                          'End All Calls',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
                     ),
 
                     if (_callViewModel.errorMessage != null &&
                         _callViewModel.errorMessage!.isNotEmpty) ...<Widget>[
-                      const SizedBox(height: 16),
+                      const SizedBox(height: 14),
                       Text(
                         _callViewModel.errorMessage!,
-                        style: const TextStyle(color: Colors.red),
+                        style:
+                            const TextStyle(color: VobizDemoApp.kRed),
+                        textAlign: TextAlign.center,
                       ),
                     ],
                   ],
@@ -216,14 +270,20 @@ class _DialerScreenState extends State<DialerScreen> {
     await showDialog<void>(
       context: context,
       builder: (BuildContext ctx) => AlertDialog(
-        title: Text(title),
+        backgroundColor: VobizDemoApp.kSurface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: const BorderSide(color: VobizDemoApp.kBorder),
+        ),
+        title: Text(title,
+            style: const TextStyle(color: Colors.white)),
         content: TextField(
           controller: controller,
           keyboardType: TextInputType.phone,
           autofocus: true,
+          style: const TextStyle(color: Colors.white),
           decoration: InputDecoration(
             hintText: hint,
-            border: const OutlineInputBorder(),
           ),
         ),
         actions: <Widget>[
@@ -241,7 +301,8 @@ class _DialerScreenState extends State<DialerScreen> {
         ],
       ),
     );
-    controller.dispose();
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => controller.dispose());
   }
 
   void _handleCallUiTransitions() {
@@ -346,7 +407,54 @@ class _DialerScreenState extends State<DialerScreen> {
 }
 
 // ---------------------------------------------------------------------------
-// Info panels
+// Status chips
+// ---------------------------------------------------------------------------
+
+class _StatusChip extends StatelessWidget {
+  const _StatusChip({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: VobizDemoApp.kSurface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: VobizDemoApp.kBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            label,
+            style: const TextStyle(
+              color: VobizDemoApp.kMuted,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.5,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Info panel
 // ---------------------------------------------------------------------------
 
 class _InfoPanel extends StatelessWidget {
@@ -360,30 +468,55 @@ class _InfoPanel extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: const Color(0xFFE3E7ED)),
+        color: VobizDemoApp.kSurface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: VobizDemoApp.kBorder),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
         children: <Widget>[
-          Text(
-            title,
-            style: TextStyle(
-              color: Colors.grey.shade700,
-              fontWeight: FontWeight.w600,
+          Container(
+            width: 8,
+            height: 8,
+            decoration: const BoxDecoration(
+              color: VobizDemoApp.kOrange,
+              shape: BoxShape.circle,
             ),
           ),
-          const SizedBox(height: 8),
-          Text(
-            body,
-            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: VobizDemoApp.kMuted,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.4,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  body,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Held call panel
+// ---------------------------------------------------------------------------
 
 class _HeldCallPanel extends StatelessWidget {
   const _HeldCallPanel({
@@ -399,40 +532,50 @@ class _HeldCallPanel extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFFFEF3C7),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: const Color(0xFFF59E0B)),
+        color: const Color(0xFF1C1400),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: VobizDemoApp.kOrange.withValues(alpha: 0.4)),
       ),
       child: Row(
         children: <Widget>[
           const Icon(Icons.pause_circle_outline,
-              color: Color(0xFFB45309), size: 22),
+              color: VobizDemoApp.kOrange, size: 22),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                Text(
-                  'On Hold',
+                const Text(
+                  'ON HOLD',
                   style: TextStyle(
-                    color: Colors.amber.shade900,
+                    color: VobizDemoApp.kOrange,
                     fontWeight: FontWeight.w700,
-                    fontSize: 12,
+                    fontSize: 11,
+                    letterSpacing: 0.8,
                   ),
                 ),
                 Text(
                   identity.isEmpty ? 'Unknown' : identity,
                   style: const TextStyle(
+                    color: Colors.white,
                     fontWeight: FontWeight.w600,
-                    fontSize: 15,
+                    fontSize: 14,
                   ),
                 ),
               ],
             ),
           ),
-          TextButton(
+          FilledButton(
             onPressed: onResume,
-            child: const Text('Resume'),
+            style: FilledButton.styleFrom(
+              backgroundColor: VobizDemoApp.kOrange,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text('Resume',
+                style: TextStyle(fontSize: 13)),
           ),
         ],
       ),
@@ -466,36 +609,40 @@ class _DialPad extends StatelessWidget {
           physics: const NeverScrollableScrollPhysics(),
           gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: 3,
-            mainAxisSpacing: 12,
-            crossAxisSpacing: 12,
-            childAspectRatio: 1.15,
+            mainAxisSpacing: 10,
+            crossAxisSpacing: 10,
+            childAspectRatio: 1.4,
           ),
           itemCount: _keys.length,
           itemBuilder: (BuildContext context, int index) {
             final String key = _keys[index];
-            return FilledButton.tonal(
-              onPressed: () => onKeyTap(key),
-              style: FilledButton.styleFrom(
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(18),
-                ),
-              ),
-              child: Text(
-                key,
-                style: const TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.w700,
+            return Material(
+              color: VobizDemoApp.kSurfaceHigh,
+              borderRadius: BorderRadius.circular(14),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(14),
+                onTap: () => onKeyTap(key),
+                child: Center(
+                  child: Text(
+                    key,
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
+                    ),
+                  ),
                 ),
               ),
             );
           },
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         Align(
           alignment: Alignment.centerRight,
-          child: IconButton.filledTonal(
+          child: IconButton(
             onPressed: onBackspace,
-            icon: const Icon(Icons.backspace_outlined),
+            icon: const Icon(Icons.backspace_outlined,
+                color: VobizDemoApp.kMuted),
           ),
         ),
       ],

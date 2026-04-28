@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
 
-/// Reusable controls shown on the active call screen.
-///
-/// Displays Mute, Hold, Add Call, Transfer, Merge (when held), and Hangup.
+import '../../app.dart';
+
 class CallControls extends StatelessWidget {
   const CallControls({
     super.key,
@@ -42,9 +41,9 @@ class CallControls extends StatelessWidget {
               label: isMuted ? 'Unmute' : 'Mute',
               onPressed: onToggleMute,
               backgroundColor: isMuted
-                  ? const Color(0xFF1E3A5F)
-                  : const Color(0xFFE9EEF5),
-              foregroundColor: isMuted ? Colors.white : Colors.black87,
+                  ? VobizDemoApp.kOrange
+                  : VobizDemoApp.kSurfaceHigh,
+              foregroundColor: Colors.white,
             ),
             const SizedBox(width: 16),
             _ControlButton(
@@ -52,9 +51,9 @@ class CallControls extends StatelessWidget {
               label: isHeld ? 'Resume' : 'Hold',
               onPressed: onHold,
               backgroundColor: isHeld
-                  ? const Color(0xFFF59E0B)
-                  : const Color(0xFFE9EEF5),
-              foregroundColor: isHeld ? Colors.white : Colors.black87,
+                  ? VobizDemoApp.kOrange
+                  : VobizDemoApp.kSurfaceHigh,
+              foregroundColor: Colors.white,
             ),
             if (canMerge) ...<Widget>[
               const SizedBox(width: 16),
@@ -62,7 +61,7 @@ class CallControls extends StatelessWidget {
                 icon: Icons.call_merge,
                 label: 'Merge',
                 onPressed: onMerge,
-                backgroundColor: const Color(0xFF16A34A),
+                backgroundColor: VobizDemoApp.kGreen,
                 foregroundColor: Colors.white,
               ),
             ],
@@ -77,16 +76,16 @@ class CallControls extends StatelessWidget {
               icon: Icons.add_call,
               label: 'Add Call',
               onPressed: onAddCall,
-              backgroundColor: const Color(0xFFE9EEF5),
-              foregroundColor: Colors.black87,
+              backgroundColor: VobizDemoApp.kSurfaceHigh,
+              foregroundColor: Colors.white,
             ),
             const SizedBox(width: 16),
             _ControlButton(
               icon: Icons.call_made,
               label: 'Transfer',
               onPressed: onTransfer,
-              backgroundColor: const Color(0xFFE9EEF5),
-              foregroundColor: Colors.black87,
+              backgroundColor: VobizDemoApp.kSurfaceHigh,
+              foregroundColor: Colors.white,
             ),
           ],
         ),
@@ -96,7 +95,7 @@ class CallControls extends StatelessWidget {
           icon: Icons.call_end,
           label: 'Hangup',
           onPressed: onHangup,
-          backgroundColor: const Color(0xFFD92D20),
+          backgroundColor: VobizDemoApp.kRed,
           foregroundColor: Colors.white,
         ),
       ],
@@ -125,22 +124,29 @@ class _ControlButton extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
         SizedBox(
-          width: 72,
-          height: 72,
+          width: 68,
+          height: 68,
           child: FilledButton(
             onPressed: onPressed,
             style: FilledButton.styleFrom(
               backgroundColor: backgroundColor,
               foregroundColor: foregroundColor,
+              disabledBackgroundColor:
+                  VobizDemoApp.kSurface,
               shape: const CircleBorder(),
+              padding: EdgeInsets.zero,
             ),
-            child: Icon(icon, size: 28),
+            child: Icon(icon, size: 26),
           ),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 6),
         Text(
           label,
-          style: const TextStyle(color: Colors.white70, fontSize: 13),
+          style: const TextStyle(
+            color: VobizDemoApp.kMuted,
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+          ),
         ),
       ],
     );

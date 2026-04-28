@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
 
-/// Popup-style incoming call screen.
-///
-/// This is presented with `showDialog` from the dialer when the SDK reports an
-/// incoming ringing call.
+import '../../app.dart';
+
 class IncomingCallScreen extends StatelessWidget {
   const IncomingCallScreen({
     super.key,
@@ -22,34 +20,48 @@ class IncomingCallScreen extends StatelessWidget {
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 24),
       child: Container(
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.all(28),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: VobizDemoApp.kSurface,
           borderRadius: BorderRadius.circular(28),
+          border: Border.all(color: VobizDemoApp.kBorder),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            const CircleAvatar(
-              radius: 34,
-              backgroundColor: Color(0xFFEAF0F7),
-              child: Icon(Icons.call, size: 30, color: Color(0xFF1E3A5F)),
+            // Pulsing ring icon
+            Container(
+              width: 72,
+              height: 72,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: VobizDemoApp.kGreen.withValues(alpha: 0.15),
+                border: Border.all(
+                    color: VobizDemoApp.kGreen.withValues(alpha: 0.4),
+                    width: 2),
+              ),
+              child: const Icon(
+                Icons.call,
+                size: 32,
+                color: VobizDemoApp.kGreen,
+              ),
             ),
             const SizedBox(height: 20),
             const Text(
               'Incoming Call',
               style: TextStyle(
-                fontSize: 24,
+                fontSize: 22,
                 fontWeight: FontWeight.w700,
+                color: Colors.white,
               ),
             ),
             const SizedBox(height: 8),
             Text(
               caller.isEmpty ? 'Unknown caller' : caller,
               textAlign: TextAlign.center,
-              style: TextStyle(
+              style: const TextStyle(
                 fontSize: 16,
-                color: Colors.grey.shade700,
+                color: VobizDemoApp.kMuted,
               ),
             ),
             const SizedBox(height: 28),
@@ -61,8 +73,8 @@ class IncomingCallScreen extends StatelessWidget {
                     icon: const Icon(Icons.call_end),
                     label: const Text('Reject'),
                     style: OutlinedButton.styleFrom(
-                      foregroundColor: const Color(0xFFD92D20),
-                      side: const BorderSide(color: Color(0xFFD92D20)),
+                      foregroundColor: VobizDemoApp.kRed,
+                      side: const BorderSide(color: VobizDemoApp.kRed),
                       padding: const EdgeInsets.symmetric(vertical: 16),
                     ),
                   ),
@@ -74,7 +86,7 @@ class IncomingCallScreen extends StatelessWidget {
                     icon: const Icon(Icons.call),
                     label: const Text('Answer'),
                     style: FilledButton.styleFrom(
-                      backgroundColor: const Color(0xFF16A34A),
+                      backgroundColor: VobizDemoApp.kGreen,
                       padding: const EdgeInsets.symmetric(vertical: 16),
                     ),
                   ),

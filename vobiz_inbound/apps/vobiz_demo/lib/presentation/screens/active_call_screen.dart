@@ -1,11 +1,9 @@
 import 'package:flutter/material.dart';
 
+import '../../app.dart';
 import '../widgets/call_controls.dart';
+import '../widgets/vobiz_logo.dart';
 
-/// Dedicated in-call screen shown while a call is ringing or active.
-///
-/// When a second call is held a banner appears at the top so the user can
-/// see who is waiting and choose to merge or resume.
 class ActiveCallScreen extends StatelessWidget {
   const ActiveCallScreen({
     super.key,
@@ -26,11 +24,7 @@ class ActiveCallScreen extends StatelessWidget {
   final String remoteIdentity;
   final String callState;
   final bool isMuted;
-
-  /// Whether this call is currently held (shows Resume instead of Hold).
   final bool isHeld;
-
-  /// Whether a second held call exists (shows Merge button).
   final bool canMerge;
 
   final VoidCallback onToggleMute;
@@ -40,22 +34,31 @@ class ActiveCallScreen extends StatelessWidget {
   final VoidCallback onTransfer;
   final VoidCallback onHangup;
 
-  /// The identity of the person on hold, shown in the banner.
   final String? heldRemoteIdentity;
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0F1728),
+      backgroundColor: VobizDemoApp.kBg,
       appBar: AppBar(
-        backgroundColor: Colors.transparent,
+        backgroundColor: VobizDemoApp.kBg,
         foregroundColor: Colors.white,
-        title: const Text('Call'),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: const <Widget>[
+            VobizLogo(width: 28),
+            SizedBox(width: 10),
+            Text(
+              'Active Call',
+              style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+            ),
+          ],
+        ),
       ),
       body: SafeArea(
         child: Column(
           children: <Widget>[
-            // Held-call banner — only visible when another call is on hold.
+            // Held-call banner
             if (heldRemoteIdentity != null && heldRemoteIdentity!.isNotEmpty)
               _HeldCallBanner(identity: heldRemoteIdentity!),
 
@@ -66,41 +69,67 @@ class ActiveCallScreen extends StatelessWidget {
                   children: <Widget>[
                     const Spacer(),
 
-                    // Active-call avatar.
-                    CircleAvatar(
-                      radius: 48,
-                      backgroundColor: isHeld
-                          ? const Color(0xFF78350F)
-                          : const Color(0xFF1E293B),
-                      child: Text(
-                        remoteIdentity.isEmpty
-                            ? '?'
-                            : remoteIdentity[0].toUpperCase(),
-                        style: const TextStyle(
-                          fontSize: 32,
-                          color: Colors.white,
-                          fontWeight: FontWeight.w700,
+                    // Avatar
+                    Container(
+                      width: 96,
+                      height: 96,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: isHeld
+                            ? const Color(0xFF1C1400)
+                            : VobizDemoApp.kSurface,
+                        border: Border.all(
+                          color: isHeld
+                              ? VobizDemoApp.kOrange
+                              : VobizDemoApp.kBorder,
+                          width: 2,
+                        ),
+                      ),
+                      child: Center(
+                        child: Text(
+                          remoteIdentity.isEmpty
+                              ? '?'
+                              : remoteIdentity[0].toUpperCase(),
+                          style: TextStyle(
+                            fontSize: 36,
+                            fontWeight: FontWeight.w700,
+                            color: isHeld
+                                ? VobizDemoApp.kOrange
+                                : Colors.white,
+                          ),
                         ),
                       ),
                     ),
-                    const SizedBox(height: 24),
+                    const SizedBox(height: 20),
 
                     Text(
                       remoteIdentity.isEmpty ? 'Unknown' : remoteIdentity,
                       textAlign: TextAlign.center,
                       style: const TextStyle(
-                        fontSize: 30,
+                        fontSize: 28,
                         fontWeight: FontWeight.w700,
                         color: Colors.white,
                       ),
                     ),
                     const SizedBox(height: 8),
 
-                    Text(
-                      callState,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        color: Color(0xFFB6C2D2),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: VobizDemoApp.kSurfaceHigh,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: VobizDemoApp.kBorder),
+                      ),
+                      child: Text(
+                        isHeld ? 'On Hold' : callState,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: isHeld
+                              ? VobizDemoApp.kOrange
+                              : VobizDemoApp.kMuted,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
 
@@ -129,8 +158,6 @@ class ActiveCallScreen extends StatelessWidget {
   }
 }
 
-/// Compact banner shown at the top of the active-call screen when a second
-/// call is parked on hold.
 class _HeldCallBanner extends StatelessWidget {
   const _HeldCallBanner({required this.identity});
 
@@ -140,18 +167,20 @@ class _HeldCallBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      color: const Color(0xFF78350F),
+      color: const Color(0xFF1C1400),
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
       child: Row(
         children: <Widget>[
-          const Icon(Icons.pause_circle_outline, color: Colors.amber, size: 20),
+          const Icon(Icons.pause_circle_outline,
+              color: VobizDemoApp.kOrange, size: 20),
           const SizedBox(width: 10),
           Expanded(
             child: Text(
               'On hold: $identity',
               style: const TextStyle(
-                color: Colors.amber,
+                color: VobizDemoApp.kOrange,
                 fontWeight: FontWeight.w600,
+                fontSize: 13,
               ),
               overflow: TextOverflow.ellipsis,
             ),

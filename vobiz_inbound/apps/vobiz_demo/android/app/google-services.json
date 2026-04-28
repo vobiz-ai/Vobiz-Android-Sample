@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "347452094242",
+    "project_id": "vobiz-in",
+    "storage_bucket": "vobiz-in.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:347452094242:android:d84af6dce9dcc012ce577b",
+        "android_client_info": {
+          "package_name": "com.example.vobiz_mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDzIPO4QULdWa8HYbar_sQk07-fGs4-iug"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

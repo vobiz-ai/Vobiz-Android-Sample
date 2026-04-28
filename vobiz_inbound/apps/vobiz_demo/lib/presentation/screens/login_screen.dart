@@ -1,13 +1,11 @@
 import 'package:flutter/material.dart';
 
+import '../../app.dart';
 import '../../integration/dependency_injection.dart';
 import '../viewmodels/sdk_view_model.dart';
+import '../widgets/vobiz_logo.dart';
 import 'dialer_screen.dart';
 
-/// First screen of the demo app.
-///
-/// It collects login credentials and opens the dialer after a successful SDK
-/// connection.
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
@@ -29,113 +27,139 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final SdkViewModel viewModel = DependencyInjection.of(context).sdkViewModel;
+    final SdkViewModel viewModel = DependencyInjection.of(context);
 
     return AnimatedBuilder(
       animation: viewModel,
       builder: (BuildContext context, _) {
         return Scaffold(
-          backgroundColor: const Color(0xFFF3F5F8),
           body: SafeArea(
             child: Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 420),
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Card(
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(24),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Form(
-                        key: _formKey,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: <Widget>[
-                            const Text(
-                              'Vobiz SDK Demo',
-                              style: TextStyle(
-                                fontSize: 28,
-                                fontWeight: FontWeight.w700,
-                              ),
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 24, vertical: 40),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      // Brand mark
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: <Widget>[
+                          const VobizLogo(width: 44),
+                          const SizedBox(width: 14),
+                          const Text(
+                            'vobiz',
+                            style: TextStyle(
+                              fontSize: 30,
+                              fontWeight: FontWeight.w800,
+                              color: Colors.white,
+                              letterSpacing: -0.5,
                             ),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Sign in to connect to the Vobiz signaling service.',
-                              style: TextStyle(
-                                color: Colors.grey.shade700,
-                                fontSize: 15,
-                              ),
-                            ),
-                            const SizedBox(height: 24),
-                            TextFormField(
-                              controller: _usernameController,
-                              decoration: const InputDecoration(
-                                labelText: 'Username',
-                                border: OutlineInputBorder(),
-                              ),
-                              validator: (String? value) {
-                                if (value == null || value.trim().isEmpty) {
-                                  return 'Username is required';
-                                }
-                                return null;
-                              },
-                            ),
-                            const SizedBox(height: 16),
-                            TextFormField(
-                              controller: _passwordController,
-                              decoration: const InputDecoration(
-                                labelText: 'Password',
-                                border: OutlineInputBorder(),
-                              ),
-                              obscureText: true,
-                              validator: (String? value) {
-                                if (value == null || value.trim().isEmpty) {
-                                  return 'Password is required';
-                                }
-                                return null;
-                              },
-                            ),
-                            const SizedBox(height: 16),
-                            _StatusCard(
-                              title: 'Connection Status',
-                              value: viewModel.connectionEvent == null
-                                  ? 'Disconnected'
-                                  : '${viewModel.connectionEvent!.connectionState.name} / '
-                                        '${viewModel.connectionEvent!.registrationState.name}',
-                              error: viewModel.errorMessage,
-                            ),
-                            const SizedBox(height: 20),
-                            SizedBox(
-                              width: double.infinity,
-                              child: FilledButton(
-                                onPressed: viewModel.isBusy
-                                    ? null
-                                    : () => _submit(viewModel),
-                                style: FilledButton.styleFrom(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 16,
-                                  ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 48),
+
+                      // Login card
+                      Container(
+                        padding: const EdgeInsets.all(24),
+                        decoration: BoxDecoration(
+                          color: VobizDemoApp.kSurface,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: VobizDemoApp.kBorder),
+                        ),
+                        child: Form(
+                          key: _formKey,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: <Widget>[
+                              const Text(
+                                'Sign in',
+                                style: TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.white,
                                 ),
-                                child: viewModel.isBusy
-                                    ? const SizedBox(
-                                        width: 20,
-                                        height: 20,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: Colors.white,
-                                        ),
-                                      )
-                                    : const Text('Login'),
                               ),
-                            ),
-                          ],
+                              const SizedBox(height: 6),
+                              const Text(
+                                'Connect to the Vobiz signaling service.',
+                                style: TextStyle(
+                                  color: VobizDemoApp.kMuted,
+                                  fontSize: 14,
+                                ),
+                              ),
+                              const SizedBox(height: 24),
+                              TextFormField(
+                                controller: _usernameController,
+                                style: const TextStyle(color: Colors.white),
+                                decoration: const InputDecoration(
+                                  labelText: 'Username',
+                                  prefixIcon: Icon(Icons.person_outline),
+                                ),
+                                validator: (String? v) =>
+                                    v == null || v.trim().isEmpty
+                                        ? 'Username is required'
+                                        : null,
+                              ),
+                              const SizedBox(height: 16),
+                              TextFormField(
+                                controller: _passwordController,
+                                obscureText: true,
+                                style: const TextStyle(color: Colors.white),
+                                decoration: const InputDecoration(
+                                  labelText: 'Password',
+                                  prefixIcon: Icon(Icons.lock_outline),
+                                ),
+                                validator: (String? v) =>
+                                    v == null || v.trim().isEmpty
+                                        ? 'Password is required'
+                                        : null,
+                              ),
+                              const SizedBox(height: 16),
+                              _StatusPanel(
+                                value: viewModel.connectionEvent == null
+                                    ? 'Disconnected'
+                                    : '${viewModel.connectionEvent!.connectionState.name}'
+                                        ' / ${viewModel.connectionEvent!.registrationState.name}',
+                                error: viewModel.errorMessage,
+                              ),
+                              const SizedBox(height: 20),
+                              SizedBox(
+                                width: double.infinity,
+                                child: FilledButton(
+                                  onPressed: viewModel.isBusy
+                                      ? null
+                                      : () => _submit(viewModel),
+                                  style: FilledButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 16),
+                                  ),
+                                  child: viewModel.isBusy
+                                      ? const SizedBox(
+                                          width: 20,
+                                          height: 20,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Colors.white,
+                                          ),
+                                        )
+                                      : const Text(
+                                          'Login',
+                                          style: TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
+                    ],
                   ),
                 ),
               ),
@@ -147,29 +171,24 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _submit(SdkViewModel viewModel) async {
-    if (!_formKey.currentState!.validate()) {
-      return;
-    }
+    if (!_formKey.currentState!.validate()) return;
 
     final bool success = await viewModel.login(
       _usernameController.text.trim(),
       _passwordController.text.trim(),
     );
 
-    if (!mounted || !success) {
-      return;
-    }
+    if (!mounted || !success) return;
 
-    Navigator.of(
-      context,
-    ).push(MaterialPageRoute<void>(builder: (_) => const DialerScreen()));
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const DialerScreen()),
+    );
   }
 }
 
-class _StatusCard extends StatelessWidget {
-  const _StatusCard({required this.title, required this.value, this.error});
+class _StatusPanel extends StatelessWidget {
+  const _StatusPanel({required this.value, this.error});
 
-  final String title;
   final String value;
   final String? error;
 
@@ -177,30 +196,41 @@ class _StatusCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: const Color(0xFFF7F8FA),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFE3E7ED)),
+        color: VobizDemoApp.kSurfaceHigh,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: VobizDemoApp.kBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Text(
-            title,
+          const Text(
+            'Connection Status',
             style: TextStyle(
-              color: Colors.grey.shade700,
+              color: VobizDemoApp.kMuted,
+              fontSize: 12,
               fontWeight: FontWeight.w600,
             ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 4),
           Text(
             value,
-            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+            style: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: Colors.white,
+            ),
           ),
           if (error != null && error!.isNotEmpty) ...<Widget>[
-            const SizedBox(height: 8),
-            Text(error!, style: const TextStyle(color: Colors.red)),
+            const SizedBox(height: 6),
+            Text(
+              error!,
+              style: const TextStyle(
+                color: VobizDemoApp.kRed,
+                fontSize: 13,
+              ),
+            ),
           ],
         ],
       ),

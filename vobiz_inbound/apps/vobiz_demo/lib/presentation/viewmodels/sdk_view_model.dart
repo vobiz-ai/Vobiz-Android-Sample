@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:vobiz_webrtc/vobiz_webrtc.dart';
 
 import '../../integration/sdk_factory.dart';
+import '../../services/fcm_service.dart';
 
 /// View model responsible for SDK authentication and connection state.
 class SdkViewModel extends ChangeNotifier {
@@ -54,6 +55,10 @@ class SdkViewModel extends ChangeNotifier {
     try {
       await _client.connect(
         CredentialConfig(username: username, password: password),
+      );
+      FcmService.registerWithBackend(
+        backendUrl: SdkFactory.backendUrl,
+        username: username,
       );
       return true;
     } catch (error) {

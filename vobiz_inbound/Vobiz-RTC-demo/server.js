@@ -7,7 +7,7 @@ const fs   = require('fs');
 const path = require('path');
 
 const port               = 3000;
-const callerId           = process.env.CALLER_ID            || '';
+const callerId           = process.env.CALLER_ID            || ''; 
 const sipEndpoint        = process.env.SIP_ENDPOINT;
 const defaultDestination = process.env.DEFAULT_DESTINATION;
 const defaultCountryCode = process.env.DEFAULT_COUNTRY_CODE || '91';
@@ -26,6 +26,41 @@ const publicUrl = (process.env.PUBLIC_URL || '').trim().replace(/\/$/, '');
 
 let lastDialedNumber = null;
 const registeredPushTokens = new Map();
+
+// ---------------------------------------------------------------------------
+// Firebase Admin SDK — for FCM push notifications
+// ---------------------------------------------------------------------------
+
+const admin = require('firebase-admin');
+let firebaseInitialized = false;
+try {
+    const serviceAccount = require('./serviceAccountKey.json');
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    firebaseInitialized = true;
+    console.log('[FCM] Firebase Admin initialized');
+} catch (e) {
+    console.warn('[FCM] Firebase Admin init failed (push notifications disabled):', e.message);
+}
+
+async function sendFcmPush(caller, backendUrl) {
+    if (!firebaseInitialized) return;
+    const entries = [...registeredPushTokens.values()];
+    if (entries.length === 0) { console.log('[FCM] No registered tokens'); return; }
+    for (const entry of entries) {
+        const token = typeof entry === 'object' ? entry.token : entry;
+        const deviceUrl = (typeof entry === 'object' && entry.backendUrl) ? entry.backendUrl : (backendUrl || 'http://10.0.2.2:3000');
+        try {
+            await admin.messaging().send({
+                token,
+                data: { type: 'inbound_call', caller: String(caller || ''), backend_url: deviceUrl },
+                android: { priority: 'high', ttl: 30000 },
+            });
+            console.log('[FCM] Push sent for inbound call from', caller);
+        } catch (e) {
+            console.error('[FCM] Push failed:', e.message);
+        }
+    }
+}
 
 // Legacy conference state (used by the "add-call / merge" flow)
 const conferenceRooms = new Map();
@@ -883,8 +918,26 @@ const server = http.createServer((req, res) => {
                 sendText(res, 400, 'username and token are required');
                 return;
             }
-            registeredPushTokens.set(username, token);
+            const storedBackendUrl = String(params.backend_url || params.backendUrl || '').trim();
+            registeredPushTokens.set(username, { token, backendUrl: storedBackendUrl });
             console.log(`Push token registered for ${username}`);
+            console.log(`\n========== FCM TOKEN ==========\n${token}\n================================\n`);
+            sendJson(res, 200, { success: true });
+            return;
+        }
+
+        // ── POST /decline-inbound ──────────────────────────────────────────
+        if (req.method === 'POST' && parsedUrl.pathname === '/decline-inbound') {
+            if (!activeCall || !activeCall.pstnCallUuid) {
+                sendJson(res, 404, { error: 'No active inbound call' });
+                return;
+            }
+            const uuidToHangup = activeCall.pstnCallUuid;
+            activeCall = null;
+            if (vobizAccountSid && vobizAuthToken) {
+                vobizApi(`/Account/${vobizAccountSid}/Call/${uuidToHangup}/`, null, 'DELETE')
+                    .catch(e => console.error('[decline] hangup error:', e.message));
+            }
             sendJson(res, 200, { success: true });
             return;
         }
@@ -1085,6 +1138,7 @@ const server = http.createServer((req, res) => {
                 pendingInbound: true,   // cleared when Flutter joins via /answer
             };
             console.log(`[inbound-conf] PSTN waiting in room ${roomId}, caller: ${normalizedCaller}`);
+            sendFcmPush(normalizedCaller, null).catch(e => console.error('[FCM]', e.message));
 
             sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
