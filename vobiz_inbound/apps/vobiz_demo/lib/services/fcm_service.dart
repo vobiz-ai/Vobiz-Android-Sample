@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -107,6 +108,14 @@ Future<void> _showIncomingCallNotification({
 class FcmService {
   FcmService._();
 
+  // Stream that emits foreground inbound call data so the UI can show
+  // an in-app dialog instead of a system notification.
+  static final StreamController<Map<String, String>> _foregroundCallController =
+      StreamController<Map<String, String>>.broadcast();
+
+  static Stream<Map<String, String>> get foregroundInboundCalls =>
+      _foregroundCallController.stream;
+
   /// Call once from main() after Firebase.initializeApp().
   static Future<void> initialize() async {
     // Create the Android notification channel.
@@ -140,14 +149,15 @@ class FcmService {
       sound: true,
     );
 
-    // Foreground message listener.
-    FirebaseMessaging.onMessage.listen((RemoteMessage message) async {
+    // Foreground: emit on stream so the UI shows an in-app dialog,
+    // not a system notification (the app is already open).
+    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
       final data = message.data;
       if (data['type'] != 'inbound_call') return;
-      final caller = data['caller'] ?? 'Unknown';
-      final backendUrl = data['backend_url'] ?? '';
-      await _showIncomingCallNotification(
-          caller: caller, backendUrl: backendUrl);
+      _foregroundCallController.add(<String, String>{
+        'caller': data['caller'] ?? 'Unknown',
+        'backend_url': data['backend_url'] ?? '',
+      });
     });
   }
 

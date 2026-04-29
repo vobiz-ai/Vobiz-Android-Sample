@@ -13,7 +13,13 @@ class SdkFactory {
     defaultValue: '',
   );
 
+  static const _callerId = String.fromEnvironment(
+    'VOBIZ_CALLER_ID',
+    defaultValue: '',
+  );
+
   static String get backendUrl => _backendUrl;
+  static String get callerId => _callerId;
 
   VobizClient createClient() {
     return VobizClient(

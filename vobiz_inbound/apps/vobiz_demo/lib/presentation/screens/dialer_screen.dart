@@ -1,7 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import '../../app.dart';
 import '../../integration/dependency_injection.dart';
+import '../../integration/sdk_factory.dart';
+import '../../services/fcm_service.dart';
 import '../viewmodels/call_view_model.dart';
 import '../viewmodels/sdk_view_model.dart';
 import '../widgets/vobiz_logo.dart';
@@ -21,6 +26,7 @@ class _DialerScreenState extends State<DialerScreen> {
   bool _initialized = false;
   bool _incomingDialogVisible = false;
   bool _callScreenVisible = false;
+  StreamSubscription<Map<String, String>>? _foregroundCallSub;
 
   @override
   void didChangeDependencies() {
@@ -31,15 +37,49 @@ class _DialerScreenState extends State<DialerScreen> {
     _callViewModel = CallViewModel(sdkViewModel.client);
     _numberController = TextEditingController();
     _callViewModel.addListener(_syncTextField);
+    _foregroundCallSub =
+        FcmService.foregroundInboundCalls.listen(_onForegroundInbound);
     _initialized = true;
   }
 
   @override
   void dispose() {
+    _foregroundCallSub?.cancel();
     _callViewModel.removeListener(_syncTextField);
     _callViewModel.dispose();
     _numberController.dispose();
     super.dispose();
+  }
+
+  void _onForegroundInbound(Map<String, String> data) {
+    if (!mounted || _incomingDialogVisible) return;
+    final String caller = data['caller'] ?? 'Unknown';
+    final String backendUrl =
+        data['backend_url']?.isNotEmpty == true
+            ? data['backend_url']!
+            : SdkFactory.backendUrl;
+    _incomingDialogVisible = true;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext ctx) => IncomingCallScreen(
+        caller: caller,
+        onAnswer: () async {
+          Navigator.of(ctx).pop();
+          FcmService.dismissCallNotification();
+          final String callerId = SdkFactory.callerId;
+          if (callerId.isNotEmpty) {
+            await _callViewModel.client.makeCall(callerId);
+          }
+        },
+        onReject: () async {
+          Navigator.of(ctx).pop();
+          try {
+            await http.post(Uri.parse('$backendUrl/decline-inbound'));
+          } catch (_) {}
+        },
+      ),
+    ).whenComplete(() => _incomingDialogVisible = false);
   }
 
   @override
