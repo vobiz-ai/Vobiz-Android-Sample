@@ -220,15 +220,24 @@ class PeerService {
     };
 
     pc.onConnectionState = (state) {
+      print('🔴 [WebRTC Connection State] $state');
       if (state == rtc.RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
         Log.info('WebRTC', 'Peer connected');
+        print('✅ [WebRTC] Connection ESTABLISHED');
         onConnected?.call();
       } else if (state ==
               rtc.RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
           state ==
               rtc.RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
         Log.warn('WebRTC', 'Peer connection lost: $state');
+        print('❌ [WebRTC] Connection FAILED/DISCONNECTED: $state');
         onDisconnected?.call();
+      } else if (state == rtc.RTCPeerConnectionState.RTCPeerConnectionStateConnecting) {
+        print('🔵 [WebRTC] Connection CONNECTING...');
+      } else if (state == rtc.RTCPeerConnectionState.RTCPeerConnectionStateNew) {
+        print('🟡 [WebRTC] Connection NEW');
+      } else if (state == rtc.RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+        print('⚪ [WebRTC] Connection CLOSED');
       }
     };
   }

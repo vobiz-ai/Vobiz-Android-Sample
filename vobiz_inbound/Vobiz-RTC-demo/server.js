@@ -214,9 +214,9 @@ function redirectCallTo(callUuid, url) {
     });
 }
 
-/** Returns true when conference-mode hold announcement can be used. */
+/** Returns true when conference-mode call orchestration can be used. */
 function canUseConferenceMode() {
-    return !!(vobizAccountSid && vobizAuthToken && publicUrl && lastDialedNumber);
+    return !!(vobizAccountSid && vobizAuthToken && publicUrl);
 }
 
 // ---------------------------------------------------------------------------
@@ -885,13 +885,15 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        // ── GET /pending-call  (Flutter polls this to detect inbound calls) ──
+        // ── POST /register-token ───────────────────────────────────────────
+        // Flutter emulator fallback: poll for inbound calls that are waiting
+        // in a Vobiz conference room.
         if (req.method === 'GET' && parsedUrl.pathname === '/pending-call') {
             if (activeCall && activeCall.pendingInbound) {
                 sendJson(res, 200, {
                     pending:    true,
                     caller:     activeCall.pstnNumber || 'Unknown',
-                    roomId:     activeCall.roomId,
+                    roomId:     activeCall.roomId || '',
                     joinNumber: callerId,
                 });
             } else {
@@ -900,7 +902,6 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        // ── POST /answer-inbound  (Flutter signals it's about to join the room) ─
         if (req.method === 'POST' && parsedUrl.pathname === '/answer-inbound') {
             if (!activeCall || !activeCall.pendingInbound) {
                 sendJson(res, 404, { error: 'No pending inbound call' });
@@ -910,7 +911,6 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        // ── POST /register-token ───────────────────────────────────────────
         if (req.method === 'POST' && parsedUrl.pathname === '/register-token') {
             const username = String(params.username || params.Username || '').trim();
             const token    = String(params.token    || params.Token    || '').trim();
@@ -985,8 +985,15 @@ const server = http.createServer((req, res) => {
         }
 
         const rawFrom    = params.From || params.from || '';
+        const rawTo      = params.To || params.to || '';
         const routeType  = String(params.RouteType || params.routeType || '').toLowerCase();
-        const isSdkCall  = rawFrom.startsWith('sip:') || routeType === 'sip';
+        const isSipLeg   = rawFrom.startsWith('sip:') || routeType === 'sip';
+        const toIsVobizNumber = callerId && isSameNumber(rawTo, callerId);
+        const isInboundConferenceJoin =
+            !!(activeCall && activeCall.pendingInbound && isSipLeg && toIsVobizNumber);
+        const isSdkCall  = isSipLeg && (!toIsVobizNumber || isInboundConferenceJoin);
+
+        console.log(`[answer-route] From="${rawFrom}" To="${rawTo}" RouteType="${routeType}" isSipLeg=${isSipLeg} toIsVobizNumber=${toIsVobizNumber} pendingJoin=${isInboundConferenceJoin} branch=${isSdkCall ? 'sdk-leg' : 'inbound-pstn'}`);
 
         // ── Outbound SDK call ──────────────────────────────────────────────
         if (isSdkCall) {
@@ -999,6 +1006,17 @@ const server = http.createServer((req, res) => {
             if (legacyRoom) {
                 console.log(`[legacy-conference] ${sdkCallSid} -> room ${legacyRoom}`);
                 sendXml(res, buildConferenceXml(legacyRoom, callerId));
+                return;
+            }
+
+            if (isInboundConferenceJoin && activeCall.roomId) {
+                activeCall.sdkCallSid = sdkCallSid;
+                activeCall.pendingInbound = false;
+                console.log(`[inbound-conf] SDK ${sdkCallSid} joined room ${activeCall.roomId}`);
+                sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Conference stayAlone="true">${escapeXml(activeCall.roomId)}</Conference>
+</Response>`);
                 return;
             }
 
@@ -1024,82 +1042,19 @@ const server = http.createServer((req, res) => {
                 }
             }
 
-            // ── Inbound conference join ──────────────────────────────────────────
-            // SDK calls own callerId → join the active conference room.
-            // Must be checked BEFORE the "cannot call own number" guard.
-            const sdkToNumber = formatToE164(params.To || params.to || '');
-            if (activeCall && activeCall.roomId &&
-                isSameNumber(sdkToNumber, callerId)) {
-                activeCall.sdkCallSid    = sdkCallSid;
-                activeCall.pendingInbound = false;
-                console.log(`[inbound-conf] SDK (${sdkCallSid}) joined room ${activeCall.roomId} ✓`);
-                sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Conference stayAlone="true">${escapeXml(activeCall.roomId)}</Conference>
-</Response>`);
-                return;
-            }
-
             if (isSameNumber(destination, callerId)) {
                 sendText(res, 400, 'Cannot call your own number');
                 return;
             }
 
+            // Store call state so hold/transfer endpoints have the SDK call UUID.
+            activeCall = {
+                sdkCallSid,
+                pstnNumber:   destination,
+                pstnCallUuid: null,
+            };
 
-            // ── Conference mode (enables hold announcement) ──────────────
-            if (canUseConferenceMode()) {
-                // Deduplicate: Vobiz sometimes fires /answer twice for the same call.
-                // If we already have an activeCall for this SDK UUID, just return
-                // the same conference room instead of creating a second one.
-                if (activeCall && activeCall.sdkCallSid === sdkCallSid) {
-                    console.log(`[conference-mode] Duplicate /answer for ${sdkCallSid} — reusing room ${activeCall.roomId}`);
-                    sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Conference>${activeCall.roomId}</Conference>
-</Response>`);
-                    return;
-                }
-
-                const roomId = `vr_${Date.now()}`;
-                console.log(`[conference-mode] Dialing PSTN into conference ${roomId} for ${destination}`);
-
-                try {
-                    const result = await dialPstnIntoConference(destination, roomId);
-                    const requestUuid = result && (result.request_uuid || result.RequestUUID || '');
-                    console.log(`[conference-mode] PSTN call queued, request_uuid: ${requestUuid}`);
-                    console.log(`[conference-mode] Full API response: ${JSON.stringify(result)}`);
-
-                    activeCall = {
-                        roomId,
-                        sdkCallSid,
-                        pstnNumber:   destination,
-                        pstnCallUuid: null,  // set when PSTN answers at /conference-join
-                    };
-
-                    // Plivo/Vobiz: <Conference> is a direct child of <Response>,
-                    // NOT inside <Dial> (that's Twilio syntax and is invalid here).
-                    // stayAlone="true": keep the conference alive when PSTN is temporarily
-                    // redirected to /hold-loop (otherwise Vobiz ends the 1-participant conf).
-                    sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Conference stayAlone="true">${roomId}</Conference>
-</Response>`);
-                } catch (e) {
-                    console.error('[conference-mode] REST API failed, using standard Dial:', e.message);
-                    // Fall back to standard Dial so the call still connects.
-                    sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Dial callerId="${escapeXml(callerId)}">
-        <Number>${escapeXml(destination)}</Number>
-    </Dial>
-</Response>`);
-                }
-
-                return;
-            }
-
-            // ── Standard Dial mode (no hold announcement — credentials not set) ─
-            console.log(`[standard-mode] Bridging to ${destination}`);
+            console.log(`[outbound] Dialing ${destination}`);
             sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Dial callerId="${escapeXml(callerId)}">
@@ -1125,17 +1080,14 @@ const server = http.createServer((req, res) => {
 
         console.log(`Inbound PSTN from ${normalizedCaller} -> ${sipEndpoint}`);
 
-        // Conference mode: put PSTN in a room. Flutter polls /pending-call to detect
-        // the incoming call, then joins the room via an outbound SIP call — same
-        // WebRTC path as outbound calls, so ICE works reliably.
-        if (vobizAccountSid && vobizAuthToken && publicUrl) {
+        if (canUseConferenceMode()) {
             const roomId = `vi_${Date.now()}`;
             activeCall = {
                 roomId,
-                sdkCallSid:    null,
-                pstnNumber:    normalizedCaller,
-                pstnCallUuid:  inboundCallUuid,
-                pendingInbound: true,   // cleared when Flutter joins via /answer
+                sdkCallSid:     null,
+                pstnNumber:     normalizedCaller,
+                pstnCallUuid:   inboundCallUuid,
+                pendingInbound: true,
             };
             console.log(`[inbound-conf] PSTN waiting in room ${roomId}, caller: ${normalizedCaller}`);
             sendFcmPush(normalizedCaller, null).catch(e => console.error('[FCM]', e.message));
@@ -1148,13 +1100,18 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        // Fallback: direct SIP dial (conference credentials not set; hold/transfer unavailable)
+        activeCall = {
+            pstnNumber:   normalizedCaller,
+            pstnCallUuid: inboundCallUuid,
+        };
+        console.log(`[inbound-direct] Routing PSTN ${normalizedCaller} directly to ${sipEndpoint}`);
+        sendFcmPush(normalizedCaller, null).catch(e => console.error('[FCM]', e.message));
+
         sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Dial callerId="${escapeXml(callerId)}" timeout="30">
         <User>${escapeXml(sipEndpoint)}</User>
     </Dial>
-    <Speak>The call could not be connected right now. Please try again in a moment.</Speak>
 </Response>`);
     });
 });

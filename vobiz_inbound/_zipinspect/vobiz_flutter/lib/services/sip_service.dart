@@ -112,8 +112,9 @@ class SipBuilder {
     String? authHeader,
   }) {
     final from = 'sip:$username@$sipServer';
-    // Add transport=ws to Contact so Vobiz knows to route via WebSocket
-    final contact = '<sip:$username@vobiz-client;transport=ws>';
+    // Match the SIP endpoint URI used by the backend's <Dial><User> route.
+    // Vobiz delivers inbound calls to sip:username@registrar.vobiz.ai over WSS.
+    final contact = '<sip:$username@$sipServer;transport=wss>';
     final buf = StringBuffer()
       ..writeln('Via: SIP/2.0/WSS vobiz-client;branch=z9hG4bK${_branch()}')
       ..writeln('From: <$from>;tag=$localTag')
@@ -149,7 +150,7 @@ class SipBuilder {
       'To: <sip:$toUser@$sipServer>',
       'Call-ID: $callId',
       'CSeq: $cseq INVITE',
-      'Contact: <sip:$fromUser@vobiz-client>',
+      'Contact: <sip:$fromUser@$sipServer;transport=wss>',
       'Max-Forwards: 70',
       'Allow: INVITE, ACK, CANCEL, BYE, OPTIONS',
       'Supported: timer',
@@ -170,6 +171,7 @@ class SipBuilder {
   static String ok200({
     required SipMessage invite,
     required String fromUser,
+    required String sipServer,
     required String localTag,
     required String sdp,
   }) {
@@ -184,7 +186,7 @@ class SipBuilder {
       'To: $taggedTo',
       'Call-ID: ${invite.header('Call-ID') ?? ''}',
       'CSeq: ${invite.header('CSeq') ?? ''}',
-      'Contact: <sip:$fromUser@vobiz-client;transport=ws>',
+      'Contact: <sip:$fromUser@$sipServer;transport=wss>',
       'Allow: INVITE, ACK, CANCEL, BYE, OPTIONS',
       'Supported: timer',
       'User-Agent: vobiz_mobile_flutter',
@@ -425,14 +427,20 @@ class SIPService {
     }
     _lastAnsweredInvite = _pendingInvite;
     _lastAnsweredSdp = sdp;
+    print('✅ [ANSWER] Sending 200 OK with SDP for inbound call');
+    print('✅ [ANSWER] SDP length: ${sdp.length}');
     _send(
       SipBuilder.ok200(
         invite: _pendingInvite!,
         fromUser: _username!,
+        sipServer: sipServer,
         localTag: _localTag,
         sdp: sdp,
       ),
     );
+    // Extract CSeq from INVITE for proper ACK tracking
+    _activeInviteCSeq = _extractCSeqNumber(_pendingInvite!.header('CSeq'));
+    print('✅ [ANSWER] Waiting for ACK from remote party (CSeq: $_activeInviteCSeq)');
     _pendingInvite = null;
   }
 
@@ -558,6 +566,12 @@ class SIPService {
         _handleIncomingCancel(msg);
         break;
       case 'ACK':
+        print('✅ [ACK] Received ACK from remote party');
+        // For inbound calls that we answered, ACK confirms the call is established
+        if (_lastAnsweredSdp != null && _lastAnsweredSdp!.isNotEmpty) {
+          print('✅ [ACK] Call is now fully established (inbound answered)');
+          onCallAnswered?.call(_lastAnsweredSdp!);
+        }
         break;
       case 'BYE':
         _handleIncomingBye(msg);
@@ -595,6 +609,7 @@ class SIPService {
             SipBuilder.ok200(
               invite: _lastAnsweredInvite!,
               fromUser: _username!,
+              sipServer: sipServer,
               localTag: _localTag,
               sdp: _lastAnsweredSdp!,
             ),

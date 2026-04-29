@@ -1,10 +1,10 @@
 Project Overview
-This repository is a Vobiz voice-calling setup with two working variants:
+This repository is a Vobiz voice-calling setup for both outbound and inbound calling.
 
 Folder	Purpose
-vobiz_inbound	Full setup for both outbound + inbound calling
-vobiz_final	Simpler setup, mainly outbound-focused
-Each variant contains:
+vobiz_inbound	Full setup for both outbound + inbound calling (main project)
+
+The project contains:
 
 Vobiz-RTC-demo/ → Node backend (Answer URL XML server)
 _zipinspect/vobiz_flutter/ → primary Flutter SIP/WebRTC app
@@ -83,7 +83,7 @@ Answer URL: https://<public-url>/answer
 Hangup URL: https://<public-url>/hangup
 Number linked to that application
 
-Required .env (for vobiz_inbound)
+Required .env (for Vobiz-RTC-demo backend)
 CALLER_ID=+<your-vobiz-number>
 SIP_ENDPOINT=sip:<your-endpoint-username>@registrar.vobiz.ai
 DEFAULT_DESTINATION=+<optional-test-number>

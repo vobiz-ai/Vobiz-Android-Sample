@@ -8,14 +8,20 @@ class SdkFactory {
     defaultValue: 'http://10.0.2.2:3000',
   );
 
+  static const _answerUrl = String.fromEnvironment(
+    'VOBIZ_ANSWER_URL',
+    defaultValue: '',
+  );
+
   static String get backendUrl => _backendUrl;
 
   VobizClient createClient() {
     return VobizClient(
-      config: const SdkConfig(
+      config: SdkConfig(
         wsUrl: 'wss://registrar.vobiz.ai:5063/',
         sipServer: 'registrar.vobiz.ai',
         backendUrl: _backendUrl,
+        answerUrl: _answerUrl.isEmpty ? null : _answerUrl,
         autoReconnect: true,
         debug: true,
       ),
