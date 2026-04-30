@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'integration/dependency_injection.dart';
-import 'presentation/screens/login_screen.dart';
+import 'presentation/screens/splash_screen.dart';
 
 class VobizDemoApp extends StatelessWidget {
   const VobizDemoApp({super.key});
@@ -29,7 +29,7 @@ class VobizDemoApp extends StatelessWidget {
         title: 'Vobiz',
         debugShowCheckedModeBanner: false,
         theme: _buildTheme(),
-        home: const LoginScreen(),
+        home: const SplashScreen(),
       ),
     );
   }

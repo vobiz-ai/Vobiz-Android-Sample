@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:http/http.dart' as http;
-
 const _kChannelId = 'vobiz_incoming_calls';
 const _kNotificationId = 1001;
 
@@ -16,8 +16,11 @@ final FlutterLocalNotificationsPlugin _localNotifications =
 // or backgrounded. Must be top-level (not a class method).
 // ---------------------------------------------------------------------------
 
+// Top-level background handler wrapper (must be top-level, not a class method).
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp();
+
   final sentTime = message.sentTime;
   if (sentTime != null && DateTime.now().difference(sentTime).inSeconds > 30) return;
 
@@ -26,6 +29,15 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
   final caller = data['caller'] ?? 'Unknown';
   final backendUrl = data['backend_url'] ?? '';
+  final roomId = data['room_id'] ?? '';
+
+  // Store notification data for killed-app recovery
+  _lastNotificationPayload = backendUrl;
+  _lastInboundCallData = {
+    'caller': caller,
+    'backend_url': backendUrl,
+    if (roomId.isNotEmpty) 'room_id': roomId,
+  };
 
   await _localNotifications.initialize(
     const InitializationSettings(
@@ -38,7 +50,8 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
 // ---------------------------------------------------------------------------
 // Top-level notification action handler — called when user taps Decline/Answer
-// buttons on the notification (runs in a background isolate on Android 12+).
+// buttons on the notification (runs in the main isolate when app is alive,
+// otherwise in a background isolate on Android 12+).
 // ---------------------------------------------------------------------------
 
 @pragma('vm:entry-point')
@@ -47,16 +60,21 @@ void onNotificationAction(NotificationResponse response) {
   final payload = response.payload ?? '';
 
   if (actionId == 'decline') {
-    // Fire-and-forget: POST decline to backend so the PSTN leg is hung up.
     if (payload.isNotEmpty) {
       http
           .post(Uri.parse('$payload/decline-inbound'))
           .catchError((_) => http.Response('', 500));
     }
+  } else if (actionId == 'answer') {
+    // When the app is already running (background), emit on the stream so
+    // DialerScreen can immediately join the call without re-login.
+    FcmService.notifyAnswerTapped();
   }
-  // 'answer' action has showsUserInterface: true and cancelNotification: true,
-  // so the app launches automatically — no extra work needed here.
 }
+
+// Store the last inbound call data from push notification for killed-app recovery
+String? _lastNotificationPayload;
+Map<String, String>? _lastInboundCallData;
 
 // ---------------------------------------------------------------------------
 // Internal helper to show the incoming call notification
@@ -108,6 +126,14 @@ Future<void> _showIncomingCallNotification({
 class FcmService {
   FcmService._();
 
+  // Emitted when the user taps the Answer action on an in-app notification
+  // (foreground/background case). Killed-app case is handled separately via
+  // wasLaunchedFromAnswerAction().
+  static final StreamController<void> _answerTappedController =
+      StreamController<void>.broadcast();
+
+  static Stream<void> get answerTapped => _answerTappedController.stream;
+
   // Stream that emits foreground inbound call data so the UI can show
   // an in-app dialog instead of a system notification.
   static final StreamController<Map<String, String>> _foregroundCallController =
@@ -115,6 +141,14 @@ class FcmService {
 
   static Stream<Map<String, String>> get foregroundInboundCalls =>
       _foregroundCallController.stream;
+
+  // Held so Dart's GC never cancels the subscription.
+  static StreamSubscription<RemoteMessage>? _onMessageSub;
+
+  /// Called from onNotificationAction when the Answer button is tapped.
+  static void notifyAnswerTapped() {
+    _answerTappedController.add(null);
+  }
 
   /// Call once from main() after Firebase.initializeApp().
   static Future<void> initialize() async {
@@ -151,7 +185,8 @@ class FcmService {
 
     // Foreground: emit on stream so the UI shows an in-app dialog,
     // not a system notification (the app is already open).
-    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+    // Stored in _onMessageSub so the GC never cancels this subscription.
+    _onMessageSub = FirebaseMessaging.onMessage.listen((RemoteMessage message) {
       final data = message.data;
       if (data['type'] != 'inbound_call') return;
       _foregroundCallController.add(<String, String>{
@@ -180,7 +215,6 @@ class FcmService {
         }),
       );
     } catch (e) {
-      // Non-fatal: push notifications simply won't work for this session.
       assert(() {
         // ignore: avoid_print
         print('[FcmService] registerWithBackend error: $e');
@@ -196,9 +230,25 @@ class FcmService {
 
   /// Returns true if the app was launched by tapping the "Answer" action button.
   static Future<bool> wasLaunchedFromAnswerAction() async {
-    final details =
-        await _localNotifications.getNotificationAppLaunchDetails();
-    if (details == null || !details.didNotificationLaunchApp) return false;
-    return details.notificationResponse?.actionId == 'answer';
+    try {
+      final details = await _localNotifications.getNotificationAppLaunchDetails();
+      if (details != null &&
+          details.didNotificationLaunchApp &&
+          details.notificationResponse?.actionId == 'answer') {
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  /// Retrieves the cached inbound call data from the last push notification.
+  /// Used when app is killed and launched from the Answer action.
+  static Map<String, String>? getLastInboundCallData() {
+    return _lastInboundCallData;
+  }
+
+  /// No-op — reserved for future use if a persistent flag is added.
+  static Future<void> clearPendingAnswer() async {
+    _lastInboundCallData = null;
   }
 }

@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../app.dart';
 import '../../integration/dependency_injection.dart';
@@ -12,9 +15,12 @@ import '../viewmodels/sdk_view_model.dart';
 import '../widgets/vobiz_logo.dart';
 import 'active_call_screen.dart';
 import 'incoming_call_screen.dart';
+import 'login_screen.dart';
 
 class DialerScreen extends StatefulWidget {
-  const DialerScreen({super.key});
+  const DialerScreen({super.key, this.autoAnswer = false});
+
+  final bool autoAnswer;
 
   @override
   State<DialerScreen> createState() => _DialerScreenState();
@@ -27,6 +33,7 @@ class _DialerScreenState extends State<DialerScreen> {
   bool _incomingDialogVisible = false;
   bool _callScreenVisible = false;
   StreamSubscription<Map<String, String>>? _foregroundCallSub;
+  StreamSubscription<void>? _answerTappedSub;
 
   @override
   void didChangeDependencies() {
@@ -39,11 +46,89 @@ class _DialerScreenState extends State<DialerScreen> {
     _callViewModel.addListener(_syncTextField);
     _foregroundCallSub =
         FcmService.foregroundInboundCalls.listen(_onForegroundInbound);
+
+    // Background case: app was alive and user tapped Answer on the notification.
+    _answerTappedSub = FcmService.answerTapped.listen((_) {
+      _joinPendingInboundCall();
+    });
+
+    // Re-register FCM token every time the dialer loads.
+    // Guards against the token never reaching the backend when auto-login
+    // fires before the backend server is running.
+    final String? username = sdkViewModel.loggedInUsername;
+    if (username != null) {
+      FcmService.registerWithBackend(
+        backendUrl: SdkFactory.backendUrl,
+        username: username,
+      );
+    }
+
     _initialized = true;
+
+    // Killed-app case: app was launched by the Answer button.
+    if (widget.autoAnswer) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _joinPendingInboundCall();
+      });
+    }
+  }
+
+  /// Asks the server if there is still a pending inbound call and, if so,
+  /// dials in to the waiting conference room. Also clears the stored flag
+  /// so a subsequent cold launch does not re-trigger.
+  Future<void> _joinPendingInboundCall() async {
+    if (!mounted || _callViewModel.hasActiveCall) return;
+    final String callerId = SdkFactory.callerId;
+    if (callerId.isEmpty) return;
+
+    try {
+      // Check for cached notification data (killed-app case)
+      final cachedData = FcmService.getLastInboundCallData();
+      final roomId = cachedData?['room_id'];
+
+      if (roomId != null && roomId.isNotEmpty) {
+        // We have a roomId from notification — tell backend we're joining this conference
+        print('[DialerScreen] Joining conference room: $roomId');
+        try {
+          await http.post(
+            Uri.parse('${SdkFactory.backendUrl}/join-conference'),
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: {'room_id': roomId},
+          );
+          print('[DialerScreen] Join-conference confirmed by backend');
+        } catch (e) {
+          print('[DialerScreen] Join-conference failed: $e (continuing anyway)');
+        }
+        await FcmService.clearPendingAnswer();
+        if (!mounted || _callViewModel.hasActiveCall) return;
+        // Now make the call — backend will route to the waiting conference
+        await _callViewModel.client.makeCall(callerId);
+        return;
+      }
+
+      // Fallback: Ask server if there's a pending call
+      final response = await http.get(
+        Uri.parse('${SdkFactory.backendUrl}/pending-call'),
+      );
+      if (!mounted) return;
+      if (response.statusCode != 200) return;
+
+      final Map<String, dynamic> body =
+          jsonDecode(response.body) as Map<String, dynamic>;
+      if (body['pending'] != true) return;
+
+      // Server has a pending call — join the conference.
+      await FcmService.clearPendingAnswer();
+      if (!mounted || _callViewModel.hasActiveCall) return;
+      await _callViewModel.client.makeCall(callerId);
+    } catch (_) {
+      // Server unreachable or call gone — nothing to do.
+    }
   }
 
   @override
   void dispose() {
+    _answerTappedSub?.cancel();
     _foregroundCallSub?.cancel();
     _callViewModel.removeListener(_syncTextField);
     _callViewModel.dispose();
@@ -82,6 +167,11 @@ class _DialerScreenState extends State<DialerScreen> {
     ).whenComplete(() => _incomingDialogVisible = false);
   }
 
+  /// Helper to get SharedPreferences for clearing Remember Me flag
+  Future<SharedPreferences> _getSharedPreferences() async {
+    return await SharedPreferences.getInstance();
+  }
+
   @override
   Widget build(BuildContext context) {
     final SdkViewModel sdkViewModel = DependencyInjection.of(context);
@@ -113,9 +203,24 @@ class _DialerScreenState extends State<DialerScreen> {
               TextButton(
                 onPressed: () async {
                   final NavigatorState nav = Navigator.of(context);
+                  
+                  // Clear saved credentials from secure storage
+                  const secureStorage = FlutterSecureStorage();
+                  await secureStorage.delete(key: 'vobiz_username');
+                  await secureStorage.delete(key: 'vobiz_password');
+                  
+                  // Clear Remember Me flag
+                  final prefs = await _getSharedPreferences();
+                  await prefs.setBool('vobiz_remember_me', false);
+                  
+                  // Disconnect SIP
                   await sdkViewModel.disconnect();
                   if (!mounted) return;
-                  nav.pop();
+                  nav.pushAndRemoveUntil(
+                    MaterialPageRoute<void>(
+                        builder: (_) => const LoginScreen()),
+                    (route) => false,
+                  );
                 },
                 child: const Text('Logout'),
               ),

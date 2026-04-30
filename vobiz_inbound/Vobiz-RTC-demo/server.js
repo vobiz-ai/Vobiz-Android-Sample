@@ -42,7 +42,7 @@ try {
     console.warn('[FCM] Firebase Admin init failed (push notifications disabled):', e.message);
 }
 
-async function sendFcmPush(caller, backendUrl) {
+async function sendFcmPush(caller, backendUrl, roomId) {
     if (!firebaseInitialized) return;
     const entries = [...registeredPushTokens.values()];
     if (entries.length === 0) { console.log('[FCM] No registered tokens'); return; }
@@ -50,12 +50,18 @@ async function sendFcmPush(caller, backendUrl) {
         const token = typeof entry === 'object' ? entry.token : entry;
         const deviceUrl = (typeof entry === 'object' && entry.backendUrl) ? entry.backendUrl : (backendUrl || 'http://10.0.2.2:3000');
         try {
+            const data = { 
+                type: 'inbound_call', 
+                caller: String(caller || ''), 
+                backend_url: deviceUrl 
+            };
+            if (roomId) data.room_id = roomId;
             await admin.messaging().send({
                 token,
-                data: { type: 'inbound_call', caller: String(caller || ''), backend_url: deviceUrl },
+                data,
                 android: { priority: 'high', ttl: 30000 },
             });
-            console.log('[FCM] Push sent for inbound call from', caller);
+            console.log('[FCM] Push sent for inbound call from', caller, roomId ? `(room: ${roomId})` : '');
         } catch (e) {
             console.error('[FCM] Push failed:', e.message);
         }
@@ -911,6 +917,34 @@ const server = http.createServer((req, res) => {
             return;
         }
 
+        // ── POST /join-conference  (killed-app recovery: join existing conference room) ──
+        if (req.method === 'POST' && parsedUrl.pathname === '/join-conference') {
+            const roomId = String(params.roomId || params.room_id || '').trim();
+            if (!roomId) {
+                sendJson(res, 400, { error: 'roomId required' });
+                return;
+            }
+
+            if (!activeCall || activeCall.roomId !== roomId || !activeCall.pendingInbound) {
+                sendJson(res, 404, { 
+                    error: 'Conference room not found or no pending inbound call',
+                    debug: { roomId, activeCallRoomId: activeCall?.roomId, pendingInbound: activeCall?.pendingInbound }
+                });
+                return;
+            }
+
+            // Room exists and is waiting — return success so app can proceed.
+            // Do NOT clear pendingInbound here; it stays true so the /answer webhook
+            // still recognises the subsequent SIP INVITE as an inbound conference join.
+            console.log(`[join-conference] App recovering from killed state, roomId=${roomId}`);
+            sendJson(res, 200, { 
+                success: true, 
+                roomId: activeCall.roomId,
+                joinNumber: callerId 
+            });
+            return;
+        }
+
         if (req.method === 'POST' && parsedUrl.pathname === '/register-token') {
             const username = String(params.username || params.Username || '').trim();
             const token    = String(params.token    || params.Token    || '').trim();
@@ -921,7 +955,6 @@ const server = http.createServer((req, res) => {
             const storedBackendUrl = String(params.backend_url || params.backendUrl || '').trim();
             registeredPushTokens.set(username, { token, backendUrl: storedBackendUrl });
             console.log(`Push token registered for ${username}`);
-            console.log(`\n========== FCM TOKEN ==========\n${token}\n================================\n`);
             sendJson(res, 200, { success: true });
             return;
         }
@@ -958,6 +991,22 @@ const server = http.createServer((req, res) => {
                 activeCall.sdkCallSid  === hungCallId ||
                 activeCall.pstnCallUuid === hungCallId
             )) {
+                // SDK leg hung up while in conference mode — terminate all remaining PSTN legs
+                // so the caller's phone is disconnected and not left in an empty conference room.
+                if (activeCall.sdkCallSid === hungCallId && activeCall.roomId) {
+                    if (activeCall.pstnCallUuid) {
+                        vobizHangupCall(activeCall.pstnCallUuid)
+                            .catch(e => console.error('[hangup] PSTN hangup failed:', e.message));
+                    }
+                    if (activeCall.secondCallUuid) {
+                        vobizHangupCall(activeCall.secondCallUuid)
+                            .catch(e => console.error('[hangup] second-call hangup failed:', e.message));
+                    }
+                    if (activeCall.addedCallUuid) {
+                        vobizHangupCall(activeCall.addedCallUuid)
+                            .catch(e => console.error('[hangup] added-call hangup failed:', e.message));
+                    }
+                }
                 console.log('[hangup] Clearing activeCall');
                 activeCall = null;
             }
@@ -1090,7 +1139,7 @@ const server = http.createServer((req, res) => {
                 pendingInbound: true,
             };
             console.log(`[inbound-conf] PSTN waiting in room ${roomId}, caller: ${normalizedCaller}`);
-            sendFcmPush(normalizedCaller, null).catch(e => console.error('[FCM]', e.message));
+            sendFcmPush(normalizedCaller, null, roomId).catch(e => console.error('[FCM]', e.message));
 
             sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
