@@ -52,24 +52,50 @@ class _SplashScreenState extends State<SplashScreen> {
     // Check before login so the result is ready when we navigate.
     final bool fromAnswer = await FcmService.wasLaunchedFromAnswerAction();
 
-    final bool success = await viewModel.login(username, password);
-    if (!mounted) return;
+    // Retry up to 3 times to handle transient server rate-limiting.
+    bool success = false;
+    for (int attempt = 0; attempt < 3 && !success; attempt++) {
+      if (attempt > 0) {
+        await Future<void>.delayed(const Duration(seconds: 4));
+        if (!mounted) return;
+        viewModel.clearError();
+      }
+      success = await viewModel.login(username, password);
+      if (!mounted) return;
+
+      // Stop immediately on authentication errors — no point retrying.
+      if (!success && _isAuthError(viewModel.errorMessage)) break;
+    }
 
     if (!success) {
-      // Credentials are stale — wipe them so the user can re-enter.
-      await _secureStorage.delete(key: 'vobiz_username');
-      await _secureStorage.delete(key: 'vobiz_password');
-      await prefs.setBool('vobiz_remember_me', false);
-      _goTo(
-        nav,
-        const LoginScreen(
-          sessionExpiredMessage: 'Session expired. Please log in again.',
-        ),
-      );
+      final bool isAuthError = _isAuthError(viewModel.errorMessage);
+      if (isAuthError) {
+        // Credentials are wrong — wipe them so the user re-enters.
+        await _secureStorage.delete(key: 'vobiz_username');
+        await _secureStorage.delete(key: 'vobiz_password');
+        await prefs.setBool('vobiz_remember_me', false);
+        _goTo(
+          nav,
+          const LoginScreen(sessionExpiredMessage: 'Session expired. Please log in again.'),
+        );
+      } else {
+        // Transient failure (server rate-limit, network) — keep credentials so
+        // the user can retry immediately from a pre-filled login form.
+        _goTo(nav, const LoginScreen());
+      }
       return;
     }
 
     _goTo(nav, DialerScreen(autoAnswer: fromAnswer));
+  }
+
+  static bool _isAuthError(String? message) {
+    if (message == null) return false;
+    final lower = message.toLowerCase();
+    return lower.contains('403') ||
+        lower.contains('wrong credentials') ||
+        lower.contains('authentication failed') ||
+        lower.contains('forbidden');
   }
 
   void _goTo(NavigatorState nav, Widget screen) {

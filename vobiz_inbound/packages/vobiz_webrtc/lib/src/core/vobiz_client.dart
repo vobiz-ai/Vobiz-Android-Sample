@@ -386,6 +386,9 @@ class VobizClient {
         message: 'Connection failed: $e',
       ));
       _emitError('connect_failed', 'Could not connect', e);
+      // SIPService no longer calls onSocketError on connect failure, so we
+      // schedule the reconnect here for both initial and retry code paths.
+      if (_config.autoReconnect) _scheduleReconnect();
       rethrow;
     }
   }
@@ -412,7 +415,8 @@ class VobizClient {
       try {
         await _connectWithCredentials(username, password);
       } catch (_) {
-        if (_config.autoReconnect) _scheduleReconnect();
+        // _connectWithCredentials already called _scheduleReconnect() on
+        // failure, so no action needed here.
       }
     });
   }

@@ -25,6 +25,9 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _rememberMeChecked = false;
   bool _showDebugInfo = false;
   String? _debugInfo;
+  // Local error — only set by explicit login attempts on this screen,
+  // not by background SDK reconnect events that update viewModel.errorMessage.
+  String? _loginError;
 
   static const String _storageKeyUsername = 'vobiz_username';
   static const String _storageKeyPassword = 'vobiz_password';
@@ -64,6 +67,36 @@ Password: ${password != null ? '***SAVED***' : 'Not saved'}''';
   }
 
   @override
+  void initState() {
+    super.initState();
+    _loadSavedCredentials();
+  }
+
+  Future<void> _loadSavedCredentials() async {
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    final bool rememberMe = prefs.getBool(_storageKeyRememberMe) ?? false;
+    if (!rememberMe) return;
+    final String? username = await _secureStorage.read(key: _storageKeyUsername);
+    final String? password = await _secureStorage.read(key: _storageKeyPassword);
+    if (!mounted) return;
+    if (username != null && password != null) {
+      setState(() {
+        _usernameController.text = username;
+        _passwordController.text = password;
+        _rememberMeChecked = true;
+      });
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Clear any stale error from background SDK reconnects so the user
+    // doesn't see raw SIP errors they didn't trigger.
+    DependencyInjection.of(context).clearError();
+  }
+
+  @override
   void dispose() {
     _usernameController.dispose();
     _passwordController.dispose();
@@ -72,13 +105,21 @@ Password: ${password != null ? '***SAVED***' : 'Not saved'}''';
 
   Future<void> _submit(SdkViewModel viewModel) async {
     if (!_formKey.currentState!.validate()) return;
+    setState(() => _loginError = null);
 
     final String username = _usernameController.text.trim();
     final String password = _passwordController.text.trim();
     final NavigatorState nav = Navigator.of(context);
 
     final bool success = await viewModel.login(username, password);
-    if (!mounted || !success) return;
+    if (!mounted) return;
+
+    if (!success) {
+      setState(() {
+        _loginError = _friendlyError(viewModel.errorMessage);
+      });
+      return;
+    }
 
     if (_rememberMeChecked) {
       await _saveCredentialsSecurely(username, password);
@@ -89,6 +130,23 @@ Password: ${password != null ? '***SAVED***' : 'Not saved'}''';
     );
   }
 
+  static String _friendlyError(String? raw) {
+    if (raw == null || raw.isEmpty) return 'Login failed. Please try again.';
+    final lower = raw.toLowerCase();
+    if (lower.contains('403') || lower.contains('wrong credentials') ||
+        lower.contains('authentication failed') || lower.contains('forbidden')) {
+      return 'Wrong username or password.';
+    }
+    if (lower.contains('timeout') || lower.contains('timed out')) {
+      return 'Connection timed out. Please try again.';
+    }
+    if (lower.contains('socket') || lower.contains('closed') ||
+        lower.contains('connection failed') || lower.contains('connect')) {
+      return 'Could not reach server. Please try again.';
+    }
+    return 'Login failed. Please try again.';
+  }
+
   @override
   Widget build(BuildContext context) {
     final SdkViewModel viewModel = DependencyInjection.of(context);
@@ -97,7 +155,7 @@ Password: ${password != null ? '***SAVED***' : 'Not saved'}''';
       animation: viewModel,
       builder: (BuildContext context, _) {
         final String? errorToShow =
-            viewModel.errorMessage ?? widget.sessionExpiredMessage;
+            _loginError ?? widget.sessionExpiredMessage;
 
         return Scaffold(
           body: SafeArea(

@@ -102,6 +102,12 @@ class SdkViewModel extends ChangeNotifier {
     }
   }
 
+  void clearError() {
+    errorMessage = null;
+    latestError = null;
+    notifyListeners();
+  }
+
   Future<void> disconnect() async {
     errorMessage = null;
     await _client.disconnect();

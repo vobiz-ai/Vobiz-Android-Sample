@@ -26,14 +26,26 @@ class DialerScreen extends StatefulWidget {
   State<DialerScreen> createState() => _DialerScreenState();
 }
 
-class _DialerScreenState extends State<DialerScreen> {
+class _DialerScreenState extends State<DialerScreen>
+    with WidgetsBindingObserver {
   late final CallViewModel _callViewModel;
   late final TextEditingController _numberController;
   bool _initialized = false;
   bool _incomingDialogVisible = false;
+  bool _sipRingingDialogVisible = false;
   bool _callScreenVisible = false;
   StreamSubscription<Map<String, String>>? _foregroundCallSub;
   StreamSubscription<void>? _answerTappedSub;
+  Timer? _inboundPoller;
+  // Tracks whether we already showed a system notification for the current
+  // pending call (so the 2-second poller doesn't spam the notification).
+  bool _bgNotificationShown = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
 
   @override
   void didChangeDependencies() {
@@ -65,12 +77,55 @@ class _DialerScreenState extends State<DialerScreen> {
 
     _initialized = true;
 
+    // Poll the server every 2 s as a fallback for when FCM onMessage
+    // does not fire reliably (e.g. emulator, background race conditions).
+    _inboundPoller = Timer.periodic(const Duration(seconds: 2), (_) {
+      _pollForInboundCall();
+    });
+
     // Killed-app case: app was launched by the Answer button.
     if (widget.autoAnswer) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _joinPendingInboundCall();
       });
     }
+  }
+
+  /// Polls /pending-call every 2 s.
+  /// • Foreground: shows the in-app Answer/Reject dialog.
+  /// • Background: shows a system notification with Answer/Decline buttons
+  ///   (so the emulator/device gets notified even when FCM delivery is slow).
+  Future<void> _pollForInboundCall() async {
+    if (!mounted || _incomingDialogVisible || _callViewModel.hasActiveCall) return;
+    try {
+      final response = await http.get(
+        Uri.parse('${SdkFactory.backendUrl}/pending-call'),
+      ).timeout(const Duration(seconds: 1));
+      if (!mounted || _incomingDialogVisible || _callViewModel.hasActiveCall) return;
+      if (response.statusCode != 200) {
+        _bgNotificationShown = false;
+        return;
+      }
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      if (body['pending'] != true) {
+        _bgNotificationShown = false;
+        return;
+      }
+      final caller = (body['caller'] as String?) ?? 'Unknown';
+      final state = WidgetsBinding.instance.lifecycleState;
+      if (state == AppLifecycleState.resumed) {
+        // App is visible — show in-app dialog.
+        _bgNotificationShown = false;
+        _onForegroundInbound(<String, String>{
+          'caller': caller,
+          'backend_url': SdkFactory.backendUrl,
+        });
+      } else if (!_bgNotificationShown) {
+        // App is in background — show system notification once.
+        _bgNotificationShown = true;
+        await FcmService.showCallNotification(caller, SdkFactory.backendUrl);
+      }
+    } catch (_) {}
   }
 
   /// Asks the server if there is still a pending inbound call and, if so,
@@ -88,17 +143,13 @@ class _DialerScreenState extends State<DialerScreen> {
 
       if (roomId != null && roomId.isNotEmpty) {
         // We have a roomId from notification — tell backend we're joining this conference
-        print('[DialerScreen] Joining conference room: $roomId');
         try {
           await http.post(
             Uri.parse('${SdkFactory.backendUrl}/join-conference'),
             headers: {'Content-Type': 'application/x-www-form-urlencoded'},
             body: {'room_id': roomId},
           );
-          print('[DialerScreen] Join-conference confirmed by backend');
-        } catch (e) {
-          print('[DialerScreen] Join-conference failed: $e (continuing anyway)');
-        }
+        } catch (_) {}
         await FcmService.clearPendingAnswer();
         if (!mounted || _callViewModel.hasActiveCall) return;
         // Now make the call — backend will route to the waiting conference
@@ -128,6 +179,8 @@ class _DialerScreenState extends State<DialerScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _inboundPoller?.cancel();
     _answerTappedSub?.cancel();
     _foregroundCallSub?.cancel();
     _callViewModel.removeListener(_syncTextField);
@@ -455,8 +508,8 @@ class _DialerScreenState extends State<DialerScreen> {
     final bool shouldShowCallScreen =
         _callViewModel.hasActiveCall && !_callViewModel.isIncomingRinging;
 
-    if (shouldShowIncomingPopup && !_incomingDialogVisible) {
-      _incomingDialogVisible = true;
+    if (shouldShowIncomingPopup && !_sipRingingDialogVisible) {
+      _sipRingingDialogVisible = true;
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         if (!mounted) return;
         await showDialog<void>(
@@ -476,11 +529,11 @@ class _DialerScreenState extends State<DialerScreen> {
             );
           },
         );
-        _incomingDialogVisible = false;
+        _sipRingingDialogVisible = false;
       });
     }
 
-    if (_incomingDialogVisible && !shouldShowIncomingPopup) {
+    if (_sipRingingDialogVisible && !shouldShowIncomingPopup) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         Navigator.of(context, rootNavigator: true).maybePop();

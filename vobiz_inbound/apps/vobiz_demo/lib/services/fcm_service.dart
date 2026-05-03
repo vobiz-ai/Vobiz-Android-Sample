@@ -223,6 +223,12 @@ class FcmService {
     }
   }
 
+  /// Shows the incoming call system notification (Answer / Decline actions).
+  /// Called from the main isolate when the app is backgrounded and polling
+  /// detects a pending call, so we don't depend on FCM background delivery.
+  static Future<void> showCallNotification(String caller, String backendUrl) =>
+      _showIncomingCallNotification(caller: caller, backendUrl: backendUrl);
+
   /// Dismisses the incoming call notification (e.g., after user answers in-app).
   static void dismissCallNotification() {
     _localNotifications.cancel(_kNotificationId);
