@@ -18,7 +18,7 @@ This guide explains how to get the credentials needed to use the Vobiz WebRTC SD
 2. Click **"Buy Number"**
 3. Choose your country and area code
 4. Confirm purchase
-5. **Copy the phone number** (e.g., `+918046733542`)
+5. **Copy the phone number** (e.g., `+15550003333`)
 
 This is your **CALLER_ID**.
 

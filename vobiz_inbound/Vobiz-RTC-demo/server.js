@@ -1186,7 +1186,7 @@ server.listen(port, () => {
      https://<your-ngrok-url>/hold-announcement
 
   Required .env:
-     CALLER_ID          = +918046733542
+     CALLER_ID          = +15550003333
      SIP_ENDPOINT       = sip:username@registrar.vobiz.ai
 
   Optional (for hold announcement):
