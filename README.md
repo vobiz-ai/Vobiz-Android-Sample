@@ -234,12 +234,15 @@ its last registration (an hour) is busy to callers until the app is opened again
 
 ### Blind transfer
 
-Transfer needs the Auth Token, so the app asks the server, giving its own CallUUID:
+Transfer needs the Auth Token, so the app asks the server. The Transfer API takes the call's
+**A-leg** CallUUID and the side to move, and the server already knows both from its own `/answer`
+webhook: when someone rings your number, the caller's call is the A-leg and the app is its B-leg;
+when the app dials out, the app's call is the A-leg.
 
 1. The user taps **Transfer** and enters a number or SIP user name
-2. The app sends `POST /calls/transfer` with `call_uuid` (`client.callUuid`) and `to`, plus the app key
-3. The server calls the Vobiz Transfer API on that call with `legs=bleg`: the leg bridged to the app — the other party — fetches new XML from `/transfer-bridge?to=…`
-4. `/transfer-bridge` answers `<Speak>Please hold…</Speak><Dial><Number>…</Number></Dial>`; the app's own leg is released
+2. The app sends `POST /calls/transfer` with its SIP user (`client.sipUsername`) and `to`, plus the app key
+3. The server looks up that phone's live call and calls the Transfer API on its A-leg, moving the other party: `legs=aleg` (the caller) for a call to your number, `legs=bleg` (the callee) for a call the app made
+4. The other party fetches `/transfer-bridge?to=…`, which answers `<Speak>Please hold…</Speak><Dial><Number>…</Number></Dial>`; the app's own leg is released
 
 ```mermaid
 sequenceDiagram
@@ -249,8 +252,9 @@ sequenceDiagram
     participant Vobiz as Vobiz platform
     participant Target as Transfer target
 
-    App->>Srv: POST /calls/transfer (call_uuid, to, X-App-Key)
-    Srv->>API: POST /Account/{id}/Call/{call_uuid}/ legs=bleg, bleg_url=/transfer-bridge?to=…
+    App->>Srv: POST /calls/transfer (sip_username, to, X-App-Key)
+    Srv->>Srv: The phone's live call: A-leg CallUUID from /answer
+    Srv->>API: POST /Account/{id}/Call/{A-leg}/ legs=aleg or bleg, url=/transfer-bridge?to=…
     API-->>Srv: Accepted
     Vobiz->>Srv: POST /transfer-bridge?to=… (X-Vobiz-Signature-V3)
     Srv-->>Vobiz: Speak "Please hold…", Dial to
@@ -302,7 +306,8 @@ push, with a second SIP connection that does not know about the first.
 
 ### The sample server (`Vobiz-RTC-demo/server.js`)
 
-One dependency (`dotenv`), Node 18+, no state between requests.
+One dependency (`dotenv`), Node 18+. Its only state is a short in-memory list of the live calls it
+answered (phone → A-leg CallUUID), for transfer; it empties on restart.
 
 | Route | Called by | Protection | Does |
 | --- | --- | --- | --- |
@@ -676,8 +681,10 @@ await client.sendDtmf('1');           // keypad for IVRs
 final stats = await client.getCallStats();   // rttMs, jitterMs, packetLossPercent
 ```
 
-Transfer needs your Auth Token, so do it on your backend with the Vobiz Transfer API and
-`client.callUuid` — as `POST /calls/transfer` does in the sample server.
+Transfer needs your Auth Token, so do it on your backend with the Vobiz Transfer API, as
+`POST /calls/transfer` does in the sample server. Use the **A-leg** CallUUID from your Answer URL
+webhook, not `client.callUuid`: on a call to the app, the CallUUID the app sees comes from Vobiz's
+WebRTC gateway, and the Call API answers 404 for it.
 
 ### Ring the app when it is closed (Android)
 
@@ -768,7 +775,7 @@ All with `X-Auth-ID` and `X-Auth-Token`, JSON, 15-second timeout:
 | --- | --- |
 | `POST /api/v1/Account/{auth_id}/JWT/Token/` | Access tokens |
 | `POST /api/v1/devices/register`, `DELETE /api/v1/devices/logout` | Push registration |
-| `POST /api/v1/Account/{auth_id}/Call/{call_uuid}/` (`legs=bleg`) | Transfer |
+| `POST /api/v1/Account/{auth_id}/Call/{a_leg_uuid}/` (`legs=aleg` or `bleg`) | Transfer |
 
 A refusal from Vobiz reaches the app as `502` with Vobiz's reason.
 
@@ -801,6 +808,7 @@ recomputes it with `PUBLIC_URL`, compares in constant time, and refuses a nonce 
 | An outbound call fails at once | `CALLER_ID` is not a number on your account | Use one of your Vobiz numbers |
 | The app cannot reach the server | A phone cannot reach `10.0.2.2`; release builds refuse `http://` | Use the tunnel's `https://` address, or `adb reverse` |
 | A 10-digit number dials the wrong country | The default country code is `91` | Set `DEFAULT_COUNTRY_CODE` / `VOBIZ_DEFAULT_COUNTRY_CODE`, or dial `+` numbers |
+| "Transfer failed: This server answered no live call for this phone" | The call did not go through this server's `/answer` (for example a Call API call with another answer URL), or the server restarted during the call | Transfer works for calls to your number and calls the app made through this server |
 
 ## Security notes
 
@@ -833,6 +841,7 @@ This is a sample. Read this section before pointing it at anything that matters.
 - Registering a phone for push uses the account's Auth ID and Auth Token, so it goes through your server.
 - Declining a pushed call still claims it first (Vobiz has no way to drop a held call without the claim).
 - **One call at a time.** A call to a phone already on a call is turned away busy.
+- Transfer works for calls this server answered. It keeps them in memory, so run one server instance (or move that list into a shared store).
 - **Conference calls are not in this sample.** The SDK's `VobizConference` adds people to a call; it needs
   four routes on your server (`/conference/add`, `/state`, `/participant`, `/end`).
 

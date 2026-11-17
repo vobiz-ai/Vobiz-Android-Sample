@@ -41,16 +41,21 @@ class BackendApi {
         httpClient: _http,
       );
 
-  /// Sends the other party of the call [callUuid] to [to], a phone number or
-  /// a SIP user name (`POST /calls/transfer`).
-  Future<void> transfer({required String callUuid, required String to}) async {
+  /// Sends the other party of [sipUsername]'s live call to [to], a phone
+  /// number or a SIP user name (`POST /calls/transfer`). The server knows the
+  /// call's A-leg from its own /answer webhook; [callUuid] is only a hint.
+  Future<void> transfer({required String sipUsername, required String to, String? callUuid}) async {
     final http.Response response;
     try {
       response = await _http
           .post(
             _uri('/calls/transfer'),
             headers: <String, String>{..._headers, 'Content-Type': 'application/json'},
-            body: jsonEncode(<String, String>{'call_uuid': callUuid, 'to': to}),
+            body: jsonEncode(<String, String>{
+              'sip_username': sipUsername,
+              'to': to,
+              if (callUuid != null) 'call_uuid': callUuid,
+            }),
           )
           .timeout(const Duration(seconds: 15));
     } catch (e) {

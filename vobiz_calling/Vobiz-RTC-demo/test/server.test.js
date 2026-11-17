@@ -244,20 +244,46 @@ test('a refusal from Vobiz comes back as 502 with its reason', async () => {
     } finally { await s.close(); }
 });
 
-test('transfer moves the other party (bleg) to the transfer XML', async () => {
+test('transfer of a call to your number moves the caller (aleg of its CallUUID)', async () => {
     const s = await start();
     try {
-        const res = await s.app('POST', '/calls/transfer', { call_uuid: '1f2e3d4c-aaaa-bbbb-cccc-1234567890ab', to: '9876543211' });
+        await webhook(s, '/answer', { From: '919876543210', To: '918000000000', CallUUID: 'caller-aleg-0001' });
+        const res = await s.app('POST', '/calls/transfer', { sip_username: 'alice', call_uuid: 'gateway-leg-9999', to: '9876543211' });
         assert.equal(res.status, 200);
-        const call = s.calls[0];
-        assert.equal(call.url, `https://api.vobiz.ai/api/v1/Account/${AUTH_ID}/Call/1f2e3d4c-aaaa-bbbb-cccc-1234567890ab/`);
-        assert.deepEqual(call.body, {
+        assert.equal(s.calls[0].url, `https://api.vobiz.ai/api/v1/Account/${AUTH_ID}/Call/caller-aleg-0001/`);
+        assert.deepEqual(s.calls[0].body, {
+            legs: 'aleg',
+            aleg_url: `${PUBLIC_URL}/transfer-bridge?to=%2B919876543211`,
+            aleg_method: 'POST',
+        });
+    } finally { await s.close(); }
+});
+
+test('transfer of a call the app made moves the callee (bleg of the app\'s CallUUID)', async () => {
+    const s = await start();
+    try {
+        await webhook(s, '/answer', { From: 'sip:alice@registrar.vobiz.ai', To: '919876543210', CallUUID: 'app-aleg-0002' });
+        const res = await s.app('POST', '/calls/transfer', { sip_username: 'alice', to: 'bob' });
+        assert.equal(res.status, 200);
+        assert.equal(s.calls[0].url, `https://api.vobiz.ai/api/v1/Account/${AUTH_ID}/Call/app-aleg-0002/`);
+        assert.deepEqual(s.calls[0].body, {
             legs: 'bleg',
-            bleg_url: `${PUBLIC_URL}/transfer-bridge?to=%2B919876543211`,
+            bleg_url: `${PUBLIC_URL}/transfer-bridge?to=sip%3Abob%40registrar.vobiz.ai`,
             bleg_method: 'POST',
         });
-        assert.equal((await s.app('POST', '/calls/transfer', { call_uuid: 'x', to: '+919876543211' })).status, 400);
-        assert.equal((await s.app('POST', '/calls/transfer', { call_uuid: '1f2e3d4c-aaaa', to: 'not a number!' })).status, 400);
+    } finally { await s.close(); }
+});
+
+test('transfer refuses unknown phones, ended calls and bad input', async () => {
+    const s = await start();
+    try {
+        assert.equal((await s.app('POST', '/calls/transfer', { sip_username: 'alice', to: '+919876543211' })).status, 409);
+        await webhook(s, '/answer', { From: '919876543210', To: '918000000000', CallUUID: 'caller-aleg-0003' });
+        await webhook(s, '/hangup', { CallUUID: 'caller-aleg-0003', HangupCause: 'NORMAL_CLEARING' });
+        assert.equal((await s.app('POST', '/calls/transfer', { sip_username: 'alice', to: '+919876543211' })).status, 409, 'after hangup');
+        assert.equal((await s.app('POST', '/calls/transfer', { to: '+919876543211' })).status, 400);
+        assert.equal((await s.app('POST', '/calls/transfer', { sip_username: 'alice', to: 'not a number!' })).status, 400);
+        assert.equal(s.calls.length, 0, 'nothing reached Vobiz');
     } finally { await s.close(); }
 });
 

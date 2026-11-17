@@ -287,9 +287,9 @@ class PhoneController extends ChangeNotifier {
   /// ends this phone's side of the call. Done by the sample server with the
   /// Vobiz Transfer API, because it needs the Auth Token.
   Future<bool> transfer(String to) async {
-    final uuid = client.callUuid;
-    if (uuid == null) {
-      _tell('Vobiz has not reported this call\'s ID yet. Try again in a moment.');
+    final user = client.sipUsername;
+    if (user == null) {
+      _tell('Sign in first.');
       return false;
     }
     final target = to.trim().startsWith(RegExp(r'[+\d]')) ? toE164(to, countryCode: AppConfig.defaultCountryCode) : to.trim();
@@ -298,7 +298,9 @@ class PhoneController extends ChangeNotifier {
       return false;
     }
     try {
-      await backend.transfer(callUuid: uuid, to: target);
+      // The server finds the call by this phone's SIP user: the CallUUID the
+      // app sees on a call to it is the WebRTC gateway's, not the call's.
+      await backend.transfer(sipUsername: user, to: target, callUuid: client.callUuid);
       _tell('Transferring to $target');
       return true;
     } on BackendException catch (e) {
@@ -349,6 +351,11 @@ class PhoneController extends ChangeNotifier {
     callDirection = e.direction ?? callDirection;
     final who = e.remoteIdentity ?? '';
     if (who.isNotEmpty) remoteParty = displayParty(who);
+    final wasIdle = previous == CallStateStatus.idle ||
+        previous == CallStateStatus.ended ||
+        previous == CallStateStatus.failed;
+    // A new call: the last call's message no longer applies.
+    if (wasIdle && hasCall) notice = null;
     switch (e.state) {
       case CallStateStatus.incoming:
         if (previous != CallStateStatus.incoming) unawaited(_ringForCall(e));
@@ -357,10 +364,7 @@ class PhoneController extends ChangeNotifier {
         _closeRingingScreen();
       case CallStateStatus.ended:
       case CallStateStatus.failed:
-        if (e.state == CallStateStatus.failed) {
-          notice = 'Call failed: ${e.reason ?? e.message ?? 'unknown reason'}'
-              '${e.sipCode == null ? '' : ' (SIP ${e.sipCode})'}';
-        }
+        if (e.state == CallStateStatus.failed) notice = _failureText(e);
         _closeRingingScreen();
         _stopCallService();
         connectedAt = null;
@@ -371,6 +375,16 @@ class PhoneController extends ChangeNotifier {
         break;
     }
     notifyListeners();
+  }
+
+  /// `Call failed: reason (SIP code)`, without repeating what the SDK's
+  /// message already says.
+  static String _failureText(CallEvent e) {
+    var why = (e.reason ?? e.message ?? 'unknown reason').trim();
+    if (!why.toLowerCase().startsWith('call failed')) why = 'Call failed: $why';
+    final code = e.sipCode;
+    if (code != null && !why.contains('$code')) why = '$why (SIP $code)';
+    return why;
   }
 
   /// A call rings here. A pushed call already has its call screen; any other

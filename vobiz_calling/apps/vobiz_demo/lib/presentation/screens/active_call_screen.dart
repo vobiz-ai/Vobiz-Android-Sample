@@ -33,11 +33,17 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
     });
   }
 
+  /// The call ended: close the keypad or transfer box if one is open, then
+  /// this screen.
   void _closeWhenEnded() {
     final c = _controller;
     if (c == null || c.hasCall || _closing || !mounted) return;
     _closing = true;
-    Navigator.of(context).maybePop();
+    final route = ModalRoute.of(context);
+    final navigator = Navigator.of(context);
+    if (route == null) return;
+    navigator.popUntil((Route<dynamic> r) => r == route);
+    if (route.isCurrent) navigator.pop();
   }
 
   @override
@@ -54,29 +60,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
       );
 
   Future<void> _showTransfer(PhoneController c) async {
-    final to = TextEditingController();
-    final target = await showDialog<String>(
-      context: context,
-      builder: (BuildContext ctx) => AlertDialog(
-        backgroundColor: VobizDemoApp.kSurface,
-        title: const Text('Transfer call', style: TextStyle(color: Colors.white)),
-        content: TextField(
-          controller: to,
-          autofocus: true,
-          style: const TextStyle(color: Colors.white),
-          decoration: const InputDecoration(
-            labelText: 'Number or SIP user',
-            hintText: '+919876543211 or alice',
-            helperText: 'The other party goes there; your side ends.',
-          ),
-        ),
-        actions: <Widget>[
-          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.of(ctx).pop(to.text), child: const Text('Transfer')),
-        ],
-      ),
-    );
-    to.dispose();
+    final target = await showDialog<String>(context: context, builder: (_) => const _TransferDialog());
     if (target != null && target.trim().isNotEmpty) await c.transfer(target);
   }
 
@@ -89,6 +73,9 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
         final held = c.isHeld;
         return Scaffold(
           backgroundColor: VobizDemoApp.kBg,
+          // The transfer box's keyboard floats over this screen instead of
+          // squeezing it.
+          resizeToAvoidBottomInset: false,
           appBar: AppBar(
             automaticallyImplyLeading: false,
             title: const Row(
@@ -187,5 +174,47 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
       CallStateStatus.incoming => 'Incoming call',
       _ => c.callState.name,
     };
+  }
+}
+
+/// Asks where to transfer the other party. It owns its text controller, so the
+/// controller lives until the box has finished closing.
+class _TransferDialog extends StatefulWidget {
+  const _TransferDialog();
+
+  @override
+  State<_TransferDialog> createState() => _TransferDialogState();
+}
+
+class _TransferDialogState extends State<_TransferDialog> {
+  final TextEditingController _to = TextEditingController();
+
+  @override
+  void dispose() {
+    _to.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: VobizDemoApp.kSurface,
+      title: const Text('Transfer call', style: TextStyle(color: Colors.white)),
+      content: TextField(
+        controller: _to,
+        autofocus: true,
+        style: const TextStyle(color: Colors.white),
+        decoration: const InputDecoration(
+          labelText: 'Number or SIP user',
+          hintText: '+91XXXXXXXXXX or alice',
+          helperText: 'The other party goes there; your side of the call ends.',
+          helperMaxLines: 2,
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.of(context).pop(_to.text), child: const Text('Transfer')),
+      ],
+    );
   }
 }

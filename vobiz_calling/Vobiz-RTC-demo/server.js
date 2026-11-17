@@ -166,6 +166,22 @@ function createServer(config = loadConfig(), deps = {}) {
     const verifySignatures = Boolean(config.authToken && config.publicUrl && !config.allowUnsignedWebhooks);
     const seenNonces = new Map();
 
+    // ── Live calls, for transfer ─────────────────────────────────────────────
+    // The Transfer API wants the call's A-leg CallUUID and the side to move. The A-leg is the
+    // CallUUID in this server's /answer webhook: the caller's call when someone rings your number
+    // (the app is its B-leg), the app's own call when the app dials out. The CallUUID the app sees
+    // on a call to it comes from Vobiz's WebRTC gateway, which the Call API does not know.
+    const liveCalls = new Map(); // SIP user -> { aLeg, appIsALeg, at }
+    function rememberCall(user, aLeg, appIsALeg) {
+        if (!user || !aLeg) return;
+        const now = Date.now();
+        for (const [u, c] of liveCalls) if (now - c.at > 4 * 60 * 60 * 1000) liveCalls.delete(u);
+        liveCalls.set(user, { aLeg, appIsALeg, at: now });
+    }
+    function forgetCall(aLeg) {
+        for (const [u, c] of liveCalls) if (c.aLeg === aLeg) liveCalls.delete(u);
+    }
+
     // ── Vobiz REST API (JSON, X-Auth-ID / X-Auth-Token) ──────────────────────
     async function vobizRequest(method, pathname, body) {
         if (!config.authId || !config.authToken) {
@@ -256,6 +272,7 @@ function createServer(config = loadConfig(), deps = {}) {
             if (dialUser) {
                 if (!SIP_USER_RE.test(dialUser)) return speakXml('That SIP user name is not valid.');
                 log(`[answer] dialling SIP user ${dialUser}`);
+                rememberCall(sipUsername(from), params.CallUUID, true);
                 return xml(`
     <Dial callerId="${escapeXml(config.callerId)}" timeout="${config.ringSeconds}">
         <User>${escapeXml(`sip:${dialUser}@${REGISTRAR}`)}</User>
@@ -269,6 +286,7 @@ function createServer(config = loadConfig(), deps = {}) {
             if (!E164_RE.test(destination)) return speakXml('There is no valid number to call.');
             if (isSameNumber(destination, config.callerId)) return speakXml('You cannot call your own Vobiz number.');
             log(`[answer] dialling ${mask(destination)}`);
+            rememberCall(sipUsername(from), params.CallUUID, true);
             return xml(`
     <Dial callerId="${escapeXml(config.callerId)}" timeout="60">
         <Number>${escapeXml(destination)}</Number>
@@ -282,6 +300,7 @@ function createServer(config = loadConfig(), deps = {}) {
             return speakXml('This server is not set up yet: SIP_ENDPOINT is missing in its settings.');
         }
         log(`[answer] ringing ${endpoints.map(sipUsername).join(', ')}`);
+        for (const e of endpoints) rememberCall(sipUsername(e), params.CallUUID, false);
         return xml(`
     <Dial timeout="${config.ringSeconds}">
 ${endpoints.map((e) => `        <User>${escapeXml(e)}</User>`).join('\n')}
@@ -345,19 +364,28 @@ ${endpoints.map((e) => `        <User>${escapeXml(e)}</User>`).join('\n')}
     }
 
     // ── POST /calls/transfer: send the other party to a number or SIP user ──
+    // Body: { sip_username: the app's SIP user (VobizClient.sipUsername), to, call_uuid?: optional }.
     async function onTransfer(req, res, url, body) {
+        const user = sipUsername(body.sip_username);
         const callUuid = String(body.call_uuid || '').trim();
-        if (!CALL_UUID_RE.test(callUuid)) return sendJson(res, 400, { error: 'call_uuid (the app\'s CallUUID) is required' });
+        if (!SIP_USER_RE.test(user) && !CALL_UUID_RE.test(callUuid)) {
+            return sendJson(res, 400, { error: 'sip_username (the app\'s SIP user) is required' });
+        }
         const target = transferTarget(body.to);
         if (!target) return sendJson(res, 400, { error: 'to must be an E.164 number such as +919876543210, or a SIP user name' });
         if (!config.publicUrl) return sendJson(res, 503, { error: 'Set PUBLIC_URL: Vobiz fetches the transfer XML from it' });
-        // legs=bleg moves the leg bridged to the app's call (the other party) to the new XML.
-        await vobizRequest('POST', accountPath(`/Call/${encodeURIComponent(callUuid)}/`), {
-            legs: 'bleg',
-            bleg_url: `${config.publicUrl}/transfer-bridge?to=${encodeURIComponent(target)}`,
-            bleg_method: 'POST',
+        const call = liveCalls.get(user) || [...liveCalls.values()].find((c) => c.aLeg === callUuid);
+        if (!call) {
+            return sendJson(res, 409, { error: 'This server answered no live call for this phone. Transfer works for calls that went through its /answer' });
+        }
+        // Move the other party: the caller's A-leg when the app was rung, the B-leg when the app dialled.
+        const legs = call.appIsALeg ? 'bleg' : 'aleg';
+        await vobizRequest('POST', accountPath(`/Call/${encodeURIComponent(call.aLeg)}/`), {
+            legs,
+            [`${legs}_url`]: `${config.publicUrl}/transfer-bridge?to=${encodeURIComponent(target)}`,
+            [`${legs}_method`]: 'POST',
         });
-        log(`[transfer] call ${callUuid} -> ${target.startsWith('sip:') ? target : mask(target)}`);
+        log(`[transfer] ${legs} of ${call.aLeg} -> ${target.startsWith('sip:') ? target : mask(target)}`);
         sendJson(res, 200, { message: 'Transfer started' });
     }
 
@@ -466,6 +494,7 @@ ${endpoints.map((e) => `        <User>${escapeXml(e)}</User>`).join('\n')}
                 log('[params]', JSON.stringify(redact(params)));
                 if (url.pathname === '/hangup') {
                     log(`[hangup] CallUUID=${params.CallUUID || '?'} cause=${params.HangupCause || params.HangupCauseName || '?'}`);
+                    if (params.CallUUID) forgetCall(String(params.CallUUID));
                     return sendXml(res, xml(''));
                 }
                 if (url.pathname === '/transfer-bridge') return sendXml(res, onTransferBridge(url));
