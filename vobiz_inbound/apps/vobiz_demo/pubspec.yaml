@@ -1,7 +1,7 @@
 name: vobiz_demo
-description: Demo app for the modular Vobiz Flutter SDK scaffold.
+description: A Flutter softphone on Vobiz - calls to and from phones, closed-app calls through Vobiz push.
 publish_to: "none"
-version: 0.1.0
+version: 2.0.0+2
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -10,10 +10,13 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  vobiz_webrtc: ^0.1.0
-  firebase_core: ^3.0.0
-  firebase_messaging: ^15.0.0
-  flutter_local_notifications: ^18.0.0
+  # The Vobiz voice SDK. 0.2.0 adds access-token sign-in, Vobiz push-to-wake,
+  # SIP hold/resume, DTMF and network-drop recovery.
+  vobiz_webrtc: ^0.2.0
+  firebase_core: ^4.15.0
+  firebase_messaging: ^16.7.0
+  # The system incoming-call screen (full screen on a locked phone).
+  flutter_callkit_incoming: ^3.1.6
   http: ^1.2.0
   shared_preferences: ^2.3.0
   flutter_secure_storage: ^9.2.0

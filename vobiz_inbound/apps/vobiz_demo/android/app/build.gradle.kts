@@ -3,7 +3,13 @@ plugins {
     id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
-    id("com.google.gms.google-services")
+}
+
+// Push (calls while the app is closed) uses Firebase, configured by
+// google-services.json from your own Firebase project. The file is git-ignored.
+// Without it the app still builds, and rings for calls while it is open.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
 }
 
 android {
@@ -14,7 +20,6 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -22,6 +27,8 @@ android {
     }
 
     defaultConfig {
+        // Use your own application ID. Vobiz pushes with the Firebase key you
+        // save in the Console for this ID (Push Notifications → Add Credential).
         applicationId = "com.example.vobiz_mobile"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
@@ -40,8 +47,4 @@ android {
 
 flutter {
     source = "../.."
-}
-
-dependencies {
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }

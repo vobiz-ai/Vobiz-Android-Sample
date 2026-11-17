@@ -1,283 +1,121 @@
-import 'dart:async';
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../app.dart';
 import '../../integration/dependency_injection.dart';
-import '../../integration/sdk_factory.dart';
-import '../../services/fcm_service.dart';
-import '../viewmodels/call_view_model.dart';
-import '../viewmodels/sdk_view_model.dart';
+import '../../phone/phone_controller.dart';
 import '../widgets/vobiz_logo.dart';
 import 'active_call_screen.dart';
 import 'incoming_call_screen.dart';
 import 'login_screen.dart';
 
+/// The home screen once signed in: connection status, whether closed-app calls
+/// work, and the dial pad. It opens the incoming-call dialog and the call
+/// screen as the call's state changes.
 class DialerScreen extends StatefulWidget {
-  const DialerScreen({super.key, this.autoAnswer = false});
-
-  final bool autoAnswer;
+  const DialerScreen({super.key});
 
   @override
   State<DialerScreen> createState() => _DialerScreenState();
 }
 
-class _DialerScreenState extends State<DialerScreen>
-    with WidgetsBindingObserver {
-  late final CallViewModel _callViewModel;
-  late final TextEditingController _numberController;
-  bool _initialized = false;
-  bool _incomingDialogVisible = false;
-  bool _sipRingingDialogVisible = false;
-  bool _callScreenVisible = false;
-  StreamSubscription<Map<String, String>>? _foregroundCallSub;
-  StreamSubscription<void>? _answerTappedSub;
-  Timer? _inboundPoller;
-  // Tracks whether we already showed a system notification for the current
-  // pending call (so the 2-second poller doesn't spam the notification).
-  bool _bgNotificationShown = false;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-  }
+class _DialerScreenState extends State<DialerScreen> {
+  final TextEditingController _number = TextEditingController();
+  PhoneController? _controller;
+  Route<void>? _incomingDialog;
+  bool _callScreenOpen = false;
+  bool? _fullScreenAllowed;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (_initialized) return;
-
-    final SdkViewModel sdkViewModel = DependencyInjection.of(context);
-    _callViewModel = CallViewModel(sdkViewModel.client);
-    _numberController = TextEditingController();
-    _callViewModel.addListener(_syncTextField);
-    _foregroundCallSub =
-        FcmService.foregroundInboundCalls.listen(_onForegroundInbound);
-
-    // Background case: app was alive and user tapped Answer on the notification.
-    _answerTappedSub = FcmService.answerTapped.listen((_) {
-      _joinPendingInboundCall();
+    if (_controller != null) return;
+    _controller = DependencyInjection.of(context)..addListener(_onChange);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _onChange());
+    _controller!.canUseFullScreen().then((bool? allowed) {
+      if (mounted) setState(() => _fullScreenAllowed = allowed);
     });
-
-    // Re-register FCM token every time the dialer loads.
-    // Guards against the token never reaching the backend when auto-login
-    // fires before the backend server is running.
-    final String? username = sdkViewModel.loggedInUsername;
-    if (username != null) {
-      FcmService.registerWithBackend(
-        backendUrl: SdkFactory.backendUrl,
-        username: username,
-      );
-    }
-
-    _initialized = true;
-
-    // Poll the server every 2 s as a fallback for when FCM onMessage
-    // does not fire reliably (e.g. emulator, background race conditions).
-    _inboundPoller = Timer.periodic(const Duration(seconds: 2), (_) {
-      _pollForInboundCall();
-    });
-
-    // Killed-app case: app was launched by the Answer button.
-    if (widget.autoAnswer) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _joinPendingInboundCall();
-      });
-    }
-  }
-
-  /// Polls /pending-call every 2 s.
-  /// • Foreground: shows the in-app Answer/Reject dialog.
-  /// • Background: shows a system notification with Answer/Decline buttons
-  ///   (so the emulator/device gets notified even when FCM delivery is slow).
-  Future<void> _pollForInboundCall() async {
-    if (!mounted || _incomingDialogVisible || _callViewModel.hasActiveCall) return;
-    try {
-      final response = await http.get(
-        Uri.parse('${SdkFactory.backendUrl}/pending-call'),
-      ).timeout(const Duration(seconds: 1));
-      if (!mounted || _incomingDialogVisible || _callViewModel.hasActiveCall) return;
-      if (response.statusCode != 200) {
-        _bgNotificationShown = false;
-        return;
-      }
-      final body = jsonDecode(response.body) as Map<String, dynamic>;
-      if (body['pending'] != true) {
-        _bgNotificationShown = false;
-        return;
-      }
-      final caller = (body['caller'] as String?) ?? 'Unknown';
-      final state = WidgetsBinding.instance.lifecycleState;
-      if (state == AppLifecycleState.resumed) {
-        // App is visible — show in-app dialog.
-        _bgNotificationShown = false;
-        _onForegroundInbound(<String, String>{
-          'caller': caller,
-          'backend_url': SdkFactory.backendUrl,
-        });
-      } else if (!_bgNotificationShown) {
-        // App is in background — show system notification once.
-        _bgNotificationShown = true;
-        await FcmService.showCallNotification(caller, SdkFactory.backendUrl);
-      }
-    } catch (_) {}
-  }
-
-  /// Asks the server if there is still a pending inbound call and, if so,
-  /// dials in to the waiting conference room. Also clears the stored flag
-  /// so a subsequent cold launch does not re-trigger.
-  Future<void> _joinPendingInboundCall() async {
-    if (!mounted || _callViewModel.hasActiveCall) return;
-    final String callerId = SdkFactory.callerId;
-    if (callerId.isEmpty) return;
-
-    try {
-      // Check for cached notification data (killed-app case)
-      final cachedData = FcmService.getLastInboundCallData();
-      final roomId = cachedData?['room_id'];
-
-      if (roomId != null && roomId.isNotEmpty) {
-        // We have a roomId from notification — tell backend we're joining this conference
-        try {
-          await http.post(
-            Uri.parse('${SdkFactory.backendUrl}/join-conference'),
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: {'room_id': roomId},
-          );
-        } catch (_) {}
-        await FcmService.clearPendingAnswer();
-        if (!mounted || _callViewModel.hasActiveCall) return;
-        // Now make the call — backend will route to the waiting conference
-        await _callViewModel.client.makeCall(callerId);
-        return;
-      }
-
-      // Fallback: Ask server if there's a pending call
-      final response = await http.get(
-        Uri.parse('${SdkFactory.backendUrl}/pending-call'),
-      );
-      if (!mounted) return;
-      if (response.statusCode != 200) return;
-
-      final Map<String, dynamic> body =
-          jsonDecode(response.body) as Map<String, dynamic>;
-      if (body['pending'] != true) return;
-
-      // Server has a pending call — join the conference.
-      await FcmService.clearPendingAnswer();
-      if (!mounted || _callViewModel.hasActiveCall) return;
-      await _callViewModel.client.makeCall(callerId);
-    } catch (_) {
-      // Server unreachable or call gone — nothing to do.
-    }
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _inboundPoller?.cancel();
-    _answerTappedSub?.cancel();
-    _foregroundCallSub?.cancel();
-    _callViewModel.removeListener(_syncTextField);
-    _callViewModel.dispose();
-    _numberController.dispose();
+    _controller?.removeListener(_onChange);
+    _number.dispose();
     super.dispose();
   }
 
-  void _onForegroundInbound(Map<String, String> data) {
-    if (!mounted || _incomingDialogVisible) return;
-    final String caller = data['caller'] ?? 'Unknown';
-    final String backendUrl =
-        data['backend_url']?.isNotEmpty == true
-            ? data['backend_url']!
-            : SdkFactory.backendUrl;
-    _incomingDialogVisible = true;
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (BuildContext ctx) => IncomingCallScreen(
-        caller: caller,
-        onAnswer: () async {
-          Navigator.of(ctx).pop();
-          FcmService.dismissCallNotification();
-          final String callerId = SdkFactory.callerId;
-          if (callerId.isNotEmpty) {
-            await _callViewModel.client.makeCall(callerId);
-          }
-        },
-        onReject: () async {
-          Navigator.of(ctx).pop();
-          try {
-            await http.post(Uri.parse('$backendUrl/decline-inbound'));
-          } catch (_) {}
-        },
-      ),
-    ).whenComplete(() => _incomingDialogVisible = false);
+  /// Opens and closes the incoming-call dialog and the call screen.
+  void _onChange() {
+    final c = _controller;
+    if (c == null || !mounted) return;
+    final navigator = Navigator.of(context);
+    if (c.isRingingIn && _incomingDialog == null) {
+      final dialog = DialogRoute<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext dialogContext) => ListenableBuilder(
+          listenable: c,
+          builder: (BuildContext context, _) => IncomingCallScreen(
+            caller: c.remoteParty,
+            onAnswer: c.answer,
+            onReject: c.decline,
+          ),
+        ),
+      );
+      _incomingDialog = dialog;
+      navigator.push(dialog).whenComplete(() {
+        if (_incomingDialog == dialog) _incomingDialog = null;
+      });
+    } else if (!c.isRingingIn && _incomingDialog != null) {
+      // Answered, declined, or the caller gave up. Removed by reference: the
+      // call screen may already be on top of it.
+      final dialog = _incomingDialog!;
+      _incomingDialog = null;
+      if (dialog.isActive) navigator.removeRoute(dialog);
+    }
+    if (c.hasCall && !c.isRingingIn && !_callScreenOpen) {
+      _callScreenOpen = true;
+      navigator
+          .push(MaterialPageRoute<void>(builder: (_) => const ActiveCallScreen(), fullscreenDialog: true))
+          .whenComplete(() => _callScreenOpen = false);
+    }
   }
 
-  /// Helper to get SharedPreferences for clearing Remember Me flag
-  Future<SharedPreferences> _getSharedPreferences() async {
-    return await SharedPreferences.getInstance();
+  Future<void> _signOut(PhoneController c) async {
+    final navigator = Navigator.of(context);
+    await c.signOut();
+    if (!mounted) return;
+    navigator.pushAndRemoveUntil(
+      MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
+      (Route<void> route) => false,
+    );
+  }
+
+  void _backToLogin(PhoneController c) {
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute<void>(builder: (_) => LoginScreen(message: c.signInError)),
+      (Route<void> route) => false,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final SdkViewModel sdkViewModel = DependencyInjection.of(context);
-
-    return AnimatedBuilder(
-      animation: Listenable.merge(<Listenable>[sdkViewModel, _callViewModel]),
+    final c = DependencyInjection.of(context);
+    return ListenableBuilder(
+      listenable: c,
       builder: (BuildContext context, _) {
-        _handleCallUiTransitions();
-
-        final bool hasHeld = _callViewModel.hasHeldCall;
-
+        final event = c.connection;
+        final failedSignIn = !c.signingIn && !c.isRegistered && c.signInError != null;
         return Scaffold(
           appBar: AppBar(
-            title: Row(
+            title: const Row(
               mainAxisSize: MainAxisSize.min,
-              children: const <Widget>[
+              children: <Widget>[
                 VobizLogo(width: 32),
                 SizedBox(width: 10),
-                Text(
-                  'Dialer',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 18,
-                  ),
-                ),
+                Text('Dialer', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18)),
               ],
             ),
-            actions: <Widget>[
-              TextButton(
-                onPressed: () async {
-                  final NavigatorState nav = Navigator.of(context);
-                  
-                  // Clear saved credentials from secure storage
-                  const secureStorage = FlutterSecureStorage();
-                  await secureStorage.delete(key: 'vobiz_username');
-                  await secureStorage.delete(key: 'vobiz_password');
-                  
-                  // Clear Remember Me flag
-                  final prefs = await _getSharedPreferences();
-                  await prefs.setBool('vobiz_remember_me', false);
-                  
-                  // Disconnect SIP
-                  await sdkViewModel.disconnect();
-                  if (!mounted) return;
-                  nav.pushAndRemoveUntil(
-                    MaterialPageRoute<void>(
-                        builder: (_) => const LoginScreen()),
-                    (route) => false,
-                  );
-                },
-                child: const Text('Logout'),
-              ),
-            ],
+            actions: <Widget>[TextButton(onPressed: () => _signOut(c), child: const Text('Sign out'))],
           ),
           body: SafeArea(
             child: Center(
@@ -286,155 +124,79 @@ class _DialerScreenState extends State<DialerScreen>
                 child: ListView(
                   padding: const EdgeInsets.all(20),
                   children: <Widget>[
-                    // Status row
                     Row(
                       children: <Widget>[
                         Expanded(
-                          child: _StatusChip(
-                            label: 'Network',
-                            value: sdkViewModel.connectionEvent == null
-                                ? 'Disconnected'
-                                : sdkViewModel
-                                    .connectionEvent!.connectionState.name,
-                          ),
-                        ),
+                            child: _StatusChip(
+                                label: 'NETWORK', value: event?.connectionState.name ?? 'disconnected')),
                         const SizedBox(width: 10),
                         Expanded(
-                          child: _StatusChip(
-                            label: 'SIP',
-                            value: sdkViewModel.connectionEvent == null
-                                ? '—'
-                                : sdkViewModel
-                                    .connectionEvent!.registrationState.name,
-                          ),
-                        ),
+                            child: _StatusChip(
+                                label: 'SIP',
+                                value: c.signingIn ? 'signing in' : (event?.registrationState.name ?? '—'))),
+                        const SizedBox(width: 10),
+                        Expanded(child: _StatusChip(label: 'CLOSED APP', value: _pushLabel(c.pushReadiness))),
                       ],
                     ),
                     const SizedBox(height: 10),
-
-                    // Call status panel
                     _InfoPanel(
-                      title: 'Call Status',
-                      body: _callViewModel.activeCall == null
-                          ? 'No active call'
-                          : '${_callViewModel.activeCall!.state.name}'
-                              ' · ${_callViewModel.activeCall!.remoteIdentity}',
+                      title: 'SIGNED IN AS',
+                      body: c.sipUsername ?? (c.savedSignIn?.label ?? '—'),
+                      detail: c.pushDetail.isEmpty ? null : c.pushDetail,
+                      accent: c.pushReadiness == PushReadiness.failed ? VobizDemoApp.kRed : VobizDemoApp.kOrange,
                     ),
-
-                    if (hasHeld) ...<Widget>[
+                    if (_fullScreenAllowed == false) ...<Widget>[
                       const SizedBox(height: 10),
-                      _HeldCallPanel(
-                        identity: _callViewModel.heldRemoteIdentity,
-                        onResume: _callViewModel.resumeHeldCall,
+                      _HintPanel(
+                        text: 'Allow full-screen calls so a call shows over the lock screen.',
+                        action: 'Allow',
+                        onTap: c.openFullScreenSettings,
                       ),
                     ],
-
+                    if (failedSignIn) ...<Widget>[
+                      const SizedBox(height: 10),
+                      _HintPanel(
+                        text: 'Sign-in failed: ${c.signInError}',
+                        action: 'Sign in again',
+                        onTap: () => _backToLogin(c),
+                        color: VobizDemoApp.kRed,
+                      ),
+                    ],
                     const SizedBox(height: 20),
-
-                    // Number field
                     TextField(
-                      controller: _numberController,
+                      controller: _number,
                       keyboardType: TextInputType.phone,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 1.5,
-                      ),
                       textAlign: TextAlign.center,
-                      decoration: InputDecoration(
-                        labelText: hasHeld
-                            ? 'Enter number for second call'
-                            : 'Enter Number',
-                        hintText: '+1 (555) 000-0000',
-                        prefixIcon: const Icon(Icons.dialpad_rounded),
+                      style: const TextStyle(
+                          color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600, letterSpacing: 1.5),
+                      decoration: const InputDecoration(
+                        labelText: 'Number to call',
+                        hintText: '+91 98765 43210',
+                        prefixIcon: Icon(Icons.dialpad_rounded),
                       ),
-                      onChanged: _callViewModel.setDestination,
                     ),
                     const SizedBox(height: 16),
-
-                    // Dial pad
                     _DialPad(
-                      onKeyTap: _callViewModel.appendDigit,
-                      onBackspace: _callViewModel.backspace,
+                      onKey: (String key) => _number.text += key,
+                      onBackspace: () {
+                        if (_number.text.isNotEmpty) {
+                          _number.text = _number.text.substring(0, _number.text.length - 1);
+                        }
+                      },
                     ),
                     const SizedBox(height: 20),
-
-                    // Call / Add Call button
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.icon(
-                        onPressed: _callViewModel.isBusy ||
-                                !sdkViewModel.isConnected
-                            ? null
-                            : hasHeld
-                                ? _callViewModel.addCallToConference
-                                : _callViewModel.makeCall,
-                        style: FilledButton.styleFrom(
-                          padding:
-                              const EdgeInsets.symmetric(vertical: 18),
-                          backgroundColor: hasHeld
-                              ? VobizDemoApp.kGreen
-                              : VobizDemoApp.kOrange,
-                        ),
-                        icon: _callViewModel.isBusy
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : Icon(
-                                hasHeld ? Icons.call_merge : Icons.call),
-                        label: Text(
-                          hasHeld ? 'Add Call' : 'Call',
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
+                    FilledButton.icon(
+                      onPressed: c.isRegistered && !c.hasCall ? () => c.call(_number.text) : null,
+                      style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 18)),
+                      icon: const Icon(Icons.call),
+                      label: const Text('Call', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
                     ),
-                    const SizedBox(height: 10),
-
-                    // End all calls
-                    SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton.icon(
-                        onPressed: _callViewModel.canHangup
-                            ? _callViewModel.hangup
-                            : null,
-                        style: OutlinedButton.styleFrom(
-                          padding:
-                              const EdgeInsets.symmetric(vertical: 18),
-                          foregroundColor: VobizDemoApp.kRed,
-                          side: BorderSide(
-                            color: _callViewModel.canHangup
-                                ? VobizDemoApp.kRed
-                                : VobizDemoApp.kBorder,
-                          ),
-                        ),
-                        icon: const Icon(Icons.call_end),
-                        label: const Text(
-                          'End All Calls',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    ),
-
-                    if (_callViewModel.errorMessage != null &&
-                        _callViewModel.errorMessage!.isNotEmpty) ...<Widget>[
+                    if (c.notice != null) ...<Widget>[
                       const SizedBox(height: 14),
-                      Text(
-                        _callViewModel.errorMessage!,
-                        style:
-                            const TextStyle(color: VobizDemoApp.kRed),
-                        textAlign: TextAlign.center,
+                      GestureDetector(
+                        onTap: c.clearNotice,
+                        child: Text(c.notice!,
+                            textAlign: TextAlign.center, style: const TextStyle(color: VobizDemoApp.kMuted)),
                       ),
                     ],
                   ],
@@ -447,166 +209,13 @@ class _DialerScreenState extends State<DialerScreen>
     );
   }
 
-  void _syncTextField() {
-    if (_numberController.text == _callViewModel.enteredNumber) return;
-    _numberController.value = TextEditingValue(
-      text: _callViewModel.enteredNumber,
-      selection: TextSelection.collapsed(
-        offset: _callViewModel.enteredNumber.length,
-      ),
-    );
-  }
-
-  Future<void> _showNumberDialog({
-    required String title,
-    required String hint,
-    required String confirmLabel,
-    required void Function(String) onConfirm,
-  }) async {
-    if (!mounted) return;
-    final TextEditingController controller = TextEditingController();
-    await showDialog<void>(
-      context: context,
-      builder: (BuildContext ctx) => AlertDialog(
-        backgroundColor: VobizDemoApp.kSurface,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(20),
-          side: const BorderSide(color: VobizDemoApp.kBorder),
-        ),
-        title: Text(title,
-            style: const TextStyle(color: Colors.white)),
-        content: TextField(
-          controller: controller,
-          keyboardType: TextInputType.phone,
-          autofocus: true,
-          style: const TextStyle(color: Colors.white),
-          decoration: InputDecoration(
-            hintText: hint,
-          ),
-        ),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              onConfirm(controller.text.trim());
-            },
-            child: Text(confirmLabel),
-          ),
-        ],
-      ),
-    );
-    WidgetsBinding.instance
-        .addPostFrameCallback((_) => controller.dispose());
-  }
-
-  void _handleCallUiTransitions() {
-    final bool shouldShowIncomingPopup = _callViewModel.isIncomingRinging;
-    final bool shouldShowCallScreen =
-        _callViewModel.hasActiveCall && !_callViewModel.isIncomingRinging;
-
-    if (shouldShowIncomingPopup && !_sipRingingDialogVisible) {
-      _sipRingingDialogVisible = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        if (!mounted) return;
-        await showDialog<void>(
-          context: context,
-          barrierDismissible: false,
-          builder: (BuildContext dialogContext) {
-            return IncomingCallScreen(
-              caller: _callViewModel.remoteIdentity,
-              onAnswer: () async {
-                Navigator.of(dialogContext).pop();
-                await _callViewModel.acceptIncomingCall();
-              },
-              onReject: () async {
-                Navigator.of(dialogContext).pop();
-                await _callViewModel.rejectIncomingCall();
-              },
-            );
-          },
-        );
-        _sipRingingDialogVisible = false;
-      });
-    }
-
-    if (_sipRingingDialogVisible && !shouldShowIncomingPopup) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        Navigator.of(context, rootNavigator: true).maybePop();
-      });
-    }
-
-    if (shouldShowCallScreen && !_callScreenVisible) {
-      _callScreenVisible = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        if (!mounted) return;
-        await Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => AnimatedBuilder(
-              animation: _callViewModel,
-              builder: (BuildContext context, __) {
-                final CallInfo? active = _callViewModel.activeCall;
-                final bool isHeld = active?.isHeld ?? false;
-
-                return ActiveCallScreen(
-                  remoteIdentity: _callViewModel.remoteIdentity,
-                  callState: active?.state.name ?? 'Call',
-                  isMuted: _callViewModel.isMuted,
-                  isHeld: isHeld,
-                  canMerge: _callViewModel.canMerge,
-                  heldRemoteIdentity: _callViewModel.hasHeldCall
-                      ? _callViewModel.heldRemoteIdentity
-                      : null,
-                  onToggleMute: () => _callViewModel.toggleMute(),
-                  onHold: isHeld
-                      ? () => _callViewModel.resumeHeldCall()
-                      : () => _callViewModel.holdActiveCall(),
-                  onMerge: () => _callViewModel.mergeConference(),
-                  onAddCall: () => _showNumberDialog(
-                    title: 'Add Call',
-                    hint: 'Number to add',
-                    confirmLabel: 'Add',
-                    onConfirm: (String number) =>
-                        _callViewModel.addCallTo(number),
-                  ),
-                  onTransfer: () => _showNumberDialog(
-                    title: 'Transfer Call',
-                    hint: 'Transfer to number',
-                    confirmLabel: 'Transfer',
-                    onConfirm: (String number) =>
-                        _callViewModel.transferCall(number),
-                  ),
-                  onHangup: () async {
-                    final String? id = _callViewModel.activeCallId;
-                    if (id != null) await _callViewModel.hangupCall(id);
-                    if (context.mounted) Navigator.of(context).pop();
-                  },
-                );
-              },
-            ),
-            fullscreenDialog: true,
-          ),
-        );
-        _callScreenVisible = false;
-      });
-    }
-
-    if (_callScreenVisible && !shouldShowCallScreen) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        Navigator.of(context).maybePop();
-      });
-    }
-  }
+  static String _pushLabel(PushReadiness r) => switch (r) {
+        PushReadiness.ready => 'ready',
+        PushReadiness.registering => 'registering',
+        PushReadiness.failed => 'off (see below)',
+        PushReadiness.off => 'off',
+      };
 }
-
-// ---------------------------------------------------------------------------
-// Status chips
-// ---------------------------------------------------------------------------
 
 class _StatusChip extends StatelessWidget {
   const _StatusChip({required this.label, required this.value});
@@ -617,7 +226,7 @@ class _StatusChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         color: VobizDemoApp.kSurface,
         borderRadius: BorderRadius.circular(12),
@@ -626,40 +235,26 @@ class _StatusChip extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Text(
-            label,
-            style: const TextStyle(
-              color: VobizDemoApp.kMuted,
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.5,
-            ),
-          ),
+          Text(label,
+              style: const TextStyle(
+                  color: VobizDemoApp.kMuted, fontSize: 10, fontWeight: FontWeight.w600, letterSpacing: 0.6)),
           const SizedBox(height: 2),
-          Text(
-            value,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-            ),
-            overflow: TextOverflow.ellipsis,
-          ),
+          Text(value,
+              style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600),
+              overflow: TextOverflow.ellipsis),
         ],
       ),
     );
   }
 }
 
-// ---------------------------------------------------------------------------
-// Info panel
-// ---------------------------------------------------------------------------
-
 class _InfoPanel extends StatelessWidget {
-  const _InfoPanel({required this.title, required this.body});
+  const _InfoPanel({required this.title, required this.body, this.detail, required this.accent});
 
   final String title;
   final String body;
+  final String? detail;
+  final Color accent;
 
   @override
   Widget build(BuildContext context) {
@@ -671,38 +266,29 @@ class _InfoPanel extends StatelessWidget {
         border: Border.all(color: VobizDemoApp.kBorder),
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           Container(
+            margin: const EdgeInsets.only(top: 5),
             width: 8,
             height: 8,
-            decoration: const BoxDecoration(
-              color: VobizDemoApp.kOrange,
-              shape: BoxShape.circle,
-            ),
+            decoration: BoxDecoration(color: accent, shape: BoxShape.circle),
           ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: VobizDemoApp.kMuted,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 0.4,
-                  ),
-                ),
+                Text(title,
+                    style: const TextStyle(
+                        color: VobizDemoApp.kMuted, fontSize: 11, fontWeight: FontWeight.w600, letterSpacing: 0.4)),
                 const SizedBox(height: 2),
-                Text(
-                  body,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
+                SelectableText(body,
+                    style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)),
+                if (detail != null) ...<Widget>[
+                  const SizedBox(height: 6),
+                  Text(detail!, style: const TextStyle(color: VobizDemoApp.kMuted, fontSize: 12)),
+                ],
               ],
             ),
           ),
@@ -712,135 +298,74 @@ class _InfoPanel extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Held call panel
-// ---------------------------------------------------------------------------
+class _HintPanel extends StatelessWidget {
+  const _HintPanel({required this.text, required this.action, required this.onTap, this.color = VobizDemoApp.kOrange});
 
-class _HeldCallPanel extends StatelessWidget {
-  const _HeldCallPanel({
-    required this.identity,
-    required this.onResume,
-  });
-
-  final String identity;
-  final VoidCallback onResume;
+  final String text;
+  final String action;
+  final VoidCallback onTap;
+  final Color color;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1400),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: VobizDemoApp.kOrange.withValues(alpha: 0.4)),
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.5)),
       ),
       child: Row(
         children: <Widget>[
-          const Icon(Icons.pause_circle_outline,
-              color: VobizDemoApp.kOrange, size: 22),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                const Text(
-                  'ON HOLD',
-                  style: TextStyle(
-                    color: VobizDemoApp.kOrange,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 11,
-                    letterSpacing: 0.8,
-                  ),
-                ),
-                Text(
-                  identity.isEmpty ? 'Unknown' : identity,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 14,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          FilledButton(
-            onPressed: onResume,
-            style: FilledButton.styleFrom(
-              backgroundColor: VobizDemoApp.kOrange,
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              minimumSize: Size.zero,
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            child: const Text('Resume',
-                style: TextStyle(fontSize: 13)),
-          ),
+          Expanded(child: Text(text, style: const TextStyle(color: Colors.white, fontSize: 13))),
+          TextButton(onPressed: onTap, child: Text(action)),
         ],
       ),
     );
   }
 }
 
-// ---------------------------------------------------------------------------
-// Dial pad
-// ---------------------------------------------------------------------------
-
 class _DialPad extends StatelessWidget {
-  const _DialPad({required this.onKeyTap, required this.onBackspace});
+  const _DialPad({required this.onKey, required this.onBackspace});
 
-  final ValueChanged<String> onKeyTap;
+  final ValueChanged<String> onKey;
   final VoidCallback onBackspace;
 
-  static const List<String> _keys = <String>[
-    '1', '2', '3',
-    '4', '5', '6',
-    '7', '8', '9',
-    '*', '0', '#',
-  ];
+  static const List<String> _keys = <String>['1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '0', '#'];
 
   @override
   Widget build(BuildContext context) {
     return Column(
       children: <Widget>[
-        GridView.builder(
+        GridView.count(
+          crossAxisCount: 3,
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 3,
-            mainAxisSpacing: 10,
-            crossAxisSpacing: 10,
-            childAspectRatio: 1.4,
-          ),
-          itemCount: _keys.length,
-          itemBuilder: (BuildContext context, int index) {
-            final String key = _keys[index];
-            return Material(
-              color: VobizDemoApp.kSurfaceHigh,
-              borderRadius: BorderRadius.circular(14),
-              child: InkWell(
+          mainAxisSpacing: 10,
+          crossAxisSpacing: 10,
+          childAspectRatio: 1.6,
+          children: <Widget>[
+            for (final String key in _keys)
+              Material(
+                color: VobizDemoApp.kSurfaceHigh,
                 borderRadius: BorderRadius.circular(14),
-                onTap: () => onKeyTap(key),
-                child: Center(
-                  child: Text(
-                    key,
-                    style: const TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.white,
-                    ),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(14),
+                  onTap: () => onKey(key),
+                  child: Center(
+                    child: Text(key,
+                        style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: Colors.white)),
                   ),
                 ),
               ),
-            );
-          },
+          ],
         ),
-        const SizedBox(height: 10),
         Align(
           alignment: Alignment.centerRight,
           child: IconButton(
+            tooltip: 'Delete',
             onPressed: onBackspace,
-            icon: const Icon(Icons.backspace_outlined,
-                color: VobizDemoApp.kMuted),
+            icon: const Icon(Icons.backspace_outlined, color: VobizDemoApp.kMuted),
           ),
         ),
       ],

@@ -1,19 +1,16 @@
-import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 
 import 'app.dart';
-import 'services/fcm_service.dart';
+import 'services/push/push_service.dart';
 
-// Top-level background handler wrapper (must be top-level, not a class method).
-@pragma('vm:entry-point')
-Future<void> _bgHandler(RemoteMessage msg) =>
-    firebaseMessagingBackgroundHandler(msg);
-
+/// The Vobiz Flutter sample: a softphone that calls phones, is called on your
+/// Vobiz number, and rings while closed through Vobiz push.
+///
+/// Also started headless by a push when the app is closed (CallEngine.kt):
+/// the PhoneController then shows the call screen and signs in, before any
+/// screen is visible.
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp();
-  FirebaseMessaging.onBackgroundMessage(_bgHandler);
-  await FcmService.initialize();
-  runApp(const VobizDemoApp());
+  final push = await PushService.start();
+  runApp(VobizDemoApp(push: push));
 }

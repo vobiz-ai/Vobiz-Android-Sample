@@ -2,10 +2,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'integration/dependency_injection.dart';
+import 'phone/phone_controller.dart';
 import 'presentation/screens/splash_screen.dart';
+import 'services/push/push_service.dart';
 
 class VobizDemoApp extends StatelessWidget {
-  const VobizDemoApp({super.key});
+  const VobizDemoApp({super.key, required this.push, this.controller});
+
+  /// Firebase push, started in main() before the app runs.
+  final PushService push;
+
+  /// Injected by tests.
+  final PhoneController? controller;
 
   static const Color kOrange = Color(0xFFE86A00);
   static const Color kOrangeDark = Color(0xFFE83C00);
@@ -25,6 +33,8 @@ class VobizDemoApp extends StatelessWidget {
     ));
 
     return DependencyInjection(
+      push: push,
+      controller: controller,
       child: MaterialApp(
         title: 'Vobiz',
         debugShowCheckedModeBanner: false,

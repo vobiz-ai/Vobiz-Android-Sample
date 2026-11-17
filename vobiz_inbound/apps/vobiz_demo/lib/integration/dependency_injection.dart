@@ -1,22 +1,25 @@
 import 'package:flutter/widgets.dart';
 
-import '../presentation/viewmodels/sdk_view_model.dart';
-import 'sdk_factory.dart';
+import '../phone/phone_controller.dart';
+import '../services/backend_api.dart';
+import '../services/push/push_service.dart';
+import 'app_config.dart';
 
-/// Provides [SdkViewModel] to the widget tree.
-///
-/// Uses a StatefulWidget + private InheritedWidget pair so the view model is
-/// created exactly once (in initState) and disposed when the subtree is removed.
+/// Creates the app's one [PhoneController] (with its VobizClient) when the
+/// app starts, before any screen, and hands it to the screens below.
 class DependencyInjection extends StatefulWidget {
-  const DependencyInjection({super.key, required this.child});
+  const DependencyInjection({super.key, required this.push, required this.child, this.controller});
 
+  final PushService push;
   final Widget child;
 
-  static SdkViewModel of(BuildContext context) {
-    final _DependencyInjectionScope? scope =
-        context.dependOnInheritedWidgetOfExactType<_DependencyInjectionScope>();
+  /// Injected by tests; made here otherwise.
+  final PhoneController? controller;
+
+  static PhoneController of(BuildContext context) {
+    final scope = context.dependOnInheritedWidgetOfExactType<_Scope>();
     assert(scope != null, 'DependencyInjection not found in widget tree');
-    return scope!.sdkViewModel;
+    return scope!.controller;
   }
 
   @override
@@ -24,37 +27,34 @@ class DependencyInjection extends StatefulWidget {
 }
 
 class _DependencyInjectionState extends State<DependencyInjection> {
-  late final SdkViewModel sdkViewModel;
+  late final PhoneController _controller = widget.controller ??
+      PhoneController(
+        client: AppConfig.createClient(),
+        backend: BackendApi(baseUrl: AppConfig.backendUrl, appKey: AppConfig.appKey),
+        push: widget.push,
+      );
 
   @override
   void initState() {
     super.initState();
-    sdkViewModel = SdkViewModel(factory: const SdkFactory());
+    if (widget.controller == null) _controller.init();
   }
 
   @override
   void dispose() {
-    sdkViewModel.dispose();
+    if (widget.controller == null) _controller.dispose();
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) {
-    return _DependencyInjectionScope(
-      sdkViewModel: sdkViewModel,
-      child: widget.child,
-    );
-  }
+  Widget build(BuildContext context) => _Scope(controller: _controller, child: widget.child);
 }
 
-class _DependencyInjectionScope extends InheritedWidget {
-  const _DependencyInjectionScope({
-    required this.sdkViewModel,
-    required super.child,
-  });
+class _Scope extends InheritedWidget {
+  const _Scope({required this.controller, required super.child});
 
-  final SdkViewModel sdkViewModel;
+  final PhoneController controller;
 
   @override
-  bool updateShouldNotify(_DependencyInjectionScope old) => false;
+  bool updateShouldNotify(_Scope old) => old.controller != controller;
 }
