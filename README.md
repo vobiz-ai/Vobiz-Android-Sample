@@ -33,6 +33,7 @@ the server.
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
 - [Setup](#setup)
+  - [Ring the app when it is closed (Firebase and Vobiz push)](#3-ring-the-app-when-it-is-closed-firebase-and-vobiz-push)
 - [Configuration](#configuration)
 - [Running and testing](#running-and-testing)
 - [Using the SDK in your own app](#using-the-sdk-in-your-own-app)
@@ -372,18 +373,96 @@ curl https://<your-public-url>/health
 
 A quick tunnel gets a new address every time it starts: update `PUBLIC_URL` and the Answer URL then.
 
-### 3. Firebase and Vobiz push (calls to a closed app)
+### 3. Ring the app when it is closed (Firebase and Vobiz push)
 
-1. In Firebase, add an **Android app** whose package name is the app's `applicationId`
-   (`com.example.vobiz_mobile` in `android/app/build.gradle.kts`; change it to your own first).
-2. Download `google-services.json` into `vobiz_calling/apps/vobiz_demo/android/app/`. It is git-ignored,
-   and the build applies the Google Services plugin only when the file is there.
-3. Firebase → **Project settings → Service accounts → Generate new private key**.
-4. Vobiz Console → **Voice → Push Notifications → Add Credential**: the same package name, platform
-   **Android**, and the service-account JSON. Vobiz uses this key to push your app; it never goes into
-   the app or this server.
+When someone calls and your app is closed, Vobiz wakes the phone with a notification from Google
+(Firebase Cloud Messaging, "FCM"). For that, Vobiz needs a **key from your Firebase project**. You get
+two files from Firebase, and you put the key into the Vobiz Console. That's all.
 
-Without Firebase the app still works; it rings only while it is open, and the dialer shows why.
+```mermaid
+flowchart LR
+    FB["Firebase console"] -->|"google-services.json"| APP["The app (android/app folder)"]
+    FB -->|"service-account key (.json)"| VC["Vobiz Console: Push Notifications"]
+    VC -->|"wakes the app when a call comes"| APP
+```
+
+Skip this step and the app still works; it just rings only while it is open.
+
+#### A. Make a Firebase project (once)
+
+1. Open the **[Firebase console](https://console.firebase.google.com/)** and sign in with your Google account.
+2. Click **Create a project** (you may see **Add project**).
+3. Type a name, for example `my-calling-app`, and click **Continue** until it says the project is ready.
+   Google Analytics is not needed.
+
+Need help? Google's guide: [Create a Firebase project](https://firebase.google.com/docs/android/setup#create-firebase-project).
+
+#### B. Add your Android app (you get `google-services.json`)
+
+1. Open **[Project settings → General](https://console.firebase.google.com/project/_/settings/general)**.
+   If Firebase asks, pick your project.
+2. Scroll to **Your apps** and click the **Android** icon.
+3. In **Android package name**, type your app's package name **exactly**:
+   `com.example.vobiz_mobile`, or your own if you changed `applicationId` in
+   `vobiz_calling/apps/vobiz_demo/android/app/build.gradle.kts`. Click **Register app**.
+4. Click **Download google-services.json**.
+5. Put the file here: `vobiz_calling/apps/vobiz_demo/android/app/google-services.json`.
+6. Click **Next**, **Next**, **Continue to console**. The sample already has the rest set up.
+
+Google's guide: [Register your app](https://firebase.google.com/docs/android/setup#register-app) and
+[Add the config file](https://firebase.google.com/docs/android/setup#add-config-file).
+
+#### C. Get the key file for Vobiz
+
+1. Open **[Project settings → Service accounts](https://console.firebase.google.com/project/_/settings/serviceaccounts/adminsdk)**.
+2. Click **Generate new private key**, then **Generate key**.
+3. A `.json` file downloads. This is the **FCM Service Account JSON** Vobiz asks for.
+
+> **Keep this file secret.** Anyone who has it can send notifications to your app. Never put it in the
+> app, on the sample server, or in Git. It goes only into the Vobiz Console (step E).
+
+#### D. Check that Cloud Messaging is on
+
+1. Open **[Project settings → Cloud Messaging](https://console.firebase.google.com/project/_/settings/cloudmessaging)**.
+2. **Firebase Cloud Messaging API (V1)** should say **Enabled**. New projects have it on.
+3. If it says **Disabled**, open the
+   **[Firebase Cloud Messaging API page in Google Cloud](https://console.cloud.google.com/apis/library/fcm.googleapis.com)**,
+   pick your project at the top, and click **Enable**.
+
+#### E. Put the key into the Vobiz Console
+
+1. Open the **[Vobiz Console](https://console.vobiz.ai/)**. In the left menu, click **Voice**, then
+   **Push Notifications** ([direct link](https://console.vobiz.ai/app/push/credentials)).
+
+   <img src="docs/images/vobiz-console-voice-menu.png" alt="Vobiz Console menu: Voice, then Push Notifications" width="220">
+
+2. Click the orange **+ Add Credential** button, top right.
+
+   <img src="docs/images/vobiz-console-push-credentials.png" alt="Vobiz Console Push Notifications page with the Add Credential button, and an Android app listed as FCM and Active">
+
+3. Fill in the form:
+
+   <img src="docs/images/vobiz-console-add-push-credential.png" alt="Vobiz Console Add Push Credential form with Platform, App Bundle ID, FCM Project ID and FCM Service Account JSON" width="520">
+
+   | Box in the form | What to put | Where you find it |
+   | --- | --- | --- |
+   | **Platform** | Click **Android (FCM)** | — |
+   | **App Bundle ID** | Your app's package name, e.g. `com.example.vobiz_mobile` | The same name you typed in step B3 |
+   | **FCM Project ID** | Your Firebase project ID, e.g. `my-calling-app-1a2b3` | [Project settings → General](https://console.firebase.google.com/project/_/settings/general) → **Project ID**. It is also `"project_id"` inside the key file |
+   | **FCM Service Account JSON** | The **whole** key file | Open the file from step C in Notepad (or any text editor), select all, copy, paste |
+   | **Partner ID** | Leave it empty | Optional |
+
+4. Click **Save Credential**. Your app now shows in the list with Platform **FCM** and Status
+   **Active**, as in the picture in step 2.
+
+#### F. Check it works
+
+1. Run the app (step 4), sign in with **Remember me** ticked, and allow notifications.
+2. The dialer shows **CLOSED APP: ready**.
+3. Swipe the app away from Recents, then call your Vobiz number. The phone rings.
+
+If it says **CLOSED APP: off**, read the message under **SIGNED IN AS**: it says what is missing. If the
+phone doesn't ring, see [Troubleshooting](#troubleshooting).
 
 ### 4. The app
 
@@ -714,7 +793,8 @@ recomputes it with `PUBLIC_URL`, compares in constant time, and refuses a nonce 
 | `/token` answers 403 | The identity is not in `TOKEN_IDENTITIES` | Add it, or sign in as one that is |
 | Registrar refuses the token (10001) | The token's `app` is missing or not on this account | Check `JWT_APP_ID` |
 | CLOSED APP shows **off** | No `google-services.json`, no app key, or Vobiz refused the device | The dialer's message says which; for a refusal, check the server log |
-| A closed app does not ring | No Firebase key saved for this package name; notifications not allowed; the app was force-stopped; or it was closed longer than its registration (an hour) | Save the credential (Setup 3); allow notifications; open the app once |
+| A closed app does not ring | No Firebase key saved for this package name; notifications not allowed; the app was force-stopped; or it was closed longer than its registration (an hour) | Save the credential ([Setup step 3](#3-ring-the-app-when-it-is-closed-firebase-and-vobiz-push)); allow notifications; open the app once |
+| CLOSED APP is **ready**, but a closed app never rings | The key in Vobiz comes from a different Firebase project than `google-services.json`, or the App Bundle ID in Vobiz is not exactly the app's package name | Take both files from the same Firebase project; make the App Bundle ID match `applicationId` letter for letter |
 | It rings, but Accept does not connect | The claim came after the 30-second hold (very slow start: debug build, emulator) | Test with a release build on a real phone |
 | The call screen is a notification, not full screen, on a locked phone | Android 14+: full-screen calls not allowed | Tap **Allow** on the dialer's banner |
 | A call connects with no audio, or one way | Microphone not granted, emulator microphone off, or a network that needs TURN | Grant the microphone; test on a phone; add TURN servers through `IceConfig` |
