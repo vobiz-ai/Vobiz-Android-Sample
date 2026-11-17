@@ -381,15 +381,27 @@ function buildConfigErrorResponseXml(message) {
 const server = http.createServer((req, res) => {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
 
-    // ── Static files ────────────────────────────────────────────────────────
+    // ── Static files: only the web client in client/ ───────────────────────
+    // The path is resolved and must stay inside client/, so a request such as
+    // /client/../.env can never read this server's own files (.env holds the
+    // Auth Token; serviceAccountKey.json the Firebase key).
     if (req.url.startsWith('/client')) {
-        const filePath = path.join(__dirname, req.url);
+        const clientDir = path.join(__dirname, 'client');
+        let relative;
+        try {
+            relative = decodeURIComponent(new URL(req.url, 'http://localhost').pathname).replace(/^\/client\/?/, '');
+        } catch {
+            res.writeHead(400); res.end('Bad request'); return;
+        }
+        const filePath = path.resolve(clientDir, relative);
+        const contentTypes = { '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css', '.png': 'image/png' };
+        const contentType = contentTypes[path.extname(filePath).toLowerCase()];
+        if (!filePath.startsWith(clientDir + path.sep) || !contentType) {
+            res.writeHead(404); res.end('Not found'); return;
+        }
         fs.readFile(filePath, (err, data) => {
             if (err) { res.writeHead(404); res.end('Not found'); return; }
-            if (filePath.endsWith('.html'))  res.setHeader('Content-Type', 'text/html');
-            else if (filePath.endsWith('.js'))  res.setHeader('Content-Type', 'application/javascript');
-            else if (filePath.endsWith('.css')) res.setHeader('Content-Type', 'text/css');
-            else if (filePath.endsWith('.png')) res.setHeader('Content-Type', 'image/png');
+            res.setHeader('Content-Type', contentType);
             res.writeHead(200);
             res.end(data);
         });

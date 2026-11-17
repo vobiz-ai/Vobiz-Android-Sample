@@ -36,7 +36,7 @@ Future<void> login({
 **Example:**
 ```dart
 await client.login(
-  username: 'dkvoice312279403969368799244',
+  username: 'your-sip-username',
   password: 'your-sip-password',
 );
 ```
@@ -498,7 +498,7 @@ class _MyAppState extends State<MyApp> {
   Future<void> _login() async {
     try {
       await _client.login(
-        username: 'dkvoice312279403969368799244',
+        username: 'your-sip-username',
         password: 'your-password',
       );
       print('✅ Logged in and registered');
