@@ -57,8 +57,8 @@ It has three parts:
 
 | Part | What it does |
 | --- | --- |
-| **Flutter app** (`vobiz_inbound/apps/vobiz_demo`) | Signs in to `registrar.vobiz.ai` over secure WebSocket, places and answers calls with WebRTC audio, and handles Vobiz's incoming-call push when it is closed. |
-| **Sample server** (`vobiz_inbound/Vobiz-RTC-demo`) | Your Vobiz application's **Answer URL**, plus the routes the app must not do itself because they need your Auth Token: access tokens, push registration and transfer. |
+| **Flutter app** (`vobiz_calling/apps/vobiz_demo`) | Signs in to `registrar.vobiz.ai` over secure WebSocket, places and answers calls with WebRTC audio, and handles Vobiz's incoming-call push when it is closed. |
+| **Sample server** (`vobiz_calling/Vobiz-RTC-demo`) | Your Vobiz application's **Answer URL**, plus the routes the app must not do itself because they need your Auth Token: access tokens, push registration and transfer. |
 | **Vobiz** | Registrar, media servers, the carrier network, and the push service that wakes the app. |
 
 It is aimed at developers evaluating Vobiz for in-app calling — field service, delivery, telehealth,
@@ -263,8 +263,9 @@ sequenceDiagram
 
 | Path | Purpose |
 | --- | --- |
-| `vobiz_inbound/apps/vobiz_demo/` | The Flutter app |
-| `vobiz_inbound/Vobiz-RTC-demo/` | The sample server (`server.js`, `test/`), plus an optional browser softphone in `client/` |
+| `vobiz_calling/` | Everything for calling in **both directions**: outbound calls from the app and inbound calls to your number |
+| `vobiz_calling/apps/vobiz_demo/` | The Flutter app |
+| `vobiz_calling/Vobiz-RTC-demo/` | The sample server (`server.js`, `test/`), plus an optional browser softphone in `client/` |
 | `VOBIZ_SDK_PRD.md` | The original product-requirements notes for the 0.1.0 scaffold. Historical: this README describes the current design |
 
 The SDK itself is the [`vobiz_webrtc`](https://pub.dev/packages/vobiz_webrtc) package on pub.dev; this
@@ -347,7 +348,7 @@ application.
 ### 2. The server
 
 ```bash
-cd vobiz_inbound/Vobiz-RTC-demo
+cd vobiz_calling/Vobiz-RTC-demo
 cp .env.example .env          # then fill it in (see Configuration)
 npm install
 npm test                      # 18 tests, no network
@@ -375,7 +376,7 @@ A quick tunnel gets a new address every time it starts: update `PUBLIC_URL` and 
 
 1. In Firebase, add an **Android app** whose package name is the app's `applicationId`
    (`com.example.vobiz_mobile` in `android/app/build.gradle.kts`; change it to your own first).
-2. Download `google-services.json` into `vobiz_inbound/apps/vobiz_demo/android/app/`. It is git-ignored,
+2. Download `google-services.json` into `vobiz_calling/apps/vobiz_demo/android/app/`. It is git-ignored,
    and the build applies the Google Services plugin only when the file is there.
 3. Firebase → **Project settings → Service accounts → Generate new private key**.
 4. Vobiz Console → **Voice → Push Notifications → Add Credential**: the same package name, platform
@@ -387,7 +388,7 @@ Without Firebase the app still works; it rings only while it is open, and the di
 ### 4. The app
 
 ```bash
-cd vobiz_inbound/apps/vobiz_demo
+cd vobiz_calling/apps/vobiz_demo
 flutter pub get
 flutter run \
   --dart-define=VOBIZ_BACKEND_URL=https://<your-public-url> \
@@ -772,7 +773,7 @@ Issues and pull requests are welcome. Before opening a PR:
 
 ```bash
 # The app
-cd vobiz_inbound/apps/vobiz_demo && flutter analyze && flutter test
+cd vobiz_calling/apps/vobiz_demo && flutter analyze && flutter test
 
 # The server
 cd ../../Vobiz-RTC-demo && npm install && npm test

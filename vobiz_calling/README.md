@@ -1,4 +1,4 @@
-# vobiz_inbound
+# vobiz_calling
 
 The sample's two runnable parts:
 
