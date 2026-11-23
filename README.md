@@ -170,7 +170,7 @@ sequenceDiagram
 
 1. Someone dials your Vobiz number
 2. Vobiz asks the Answer URL of the number's application
-3. The server answers `<Dial timeout="45"><User>sip:alice…@registrar.vobiz.ai</User></Dial>`, one `<User>` per `SIP_ENDPOINT`; the caller's own number reaches the app
+3. The server answers `<Dial callerId="CALLER_ID" callerName="+91…" timeout="45"><User sipHeaders="CallerX-VH=91…">sip:alice…@registrar.vobiz.ai</User></Dial>`, one `<User>` per `SIP_ENDPOINT`. Vobiz rings an app only with one of your numbers as the caller ID (without `callerId` it turns the call away at once as busy), so the real caller's number travels in the `CallerX-VH` header and the app shows it
 4. The registrar sends the `INVITE` to every phone signed in as that SIP user
 5. The app shows the system call screen and an in-app dialog; the first phone to answer gets the call
 
@@ -184,7 +184,7 @@ sequenceDiagram
 
     Caller->>Vobiz: Dials your Vobiz number
     Vobiz->>Srv: POST /answer (From=+91…, To=your number, X-Vobiz-Signature-V3)
-    Srv-->>Vobiz: Dial timeout=45, User sip:alice…@registrar.vobiz.ai
+    Srv-->>Vobiz: Dial callerId=CALLER_ID, User sip:alice…@registrar.vobiz.ai (CallerX-VH = the real caller)
     Vobiz->>Reg: INVITE for alice…
     Reg->>App: INVITE (WSS)
     App-->>Reg: 180 Ringing — call screen and in-app dialog
@@ -498,7 +498,7 @@ file.
 | --- | --- | --- | --- |
 | `PORT` | No | `3000` | Port to listen on |
 | `PUBLIC_URL` | Yes | — | The server's public HTTPS address, exactly as Vobiz calls it. Used to check webhook signatures and to build the transfer URL |
-| `CALLER_ID` | Yes | — | A number on your account, E.164. The caller ID on calls the app makes to phones |
+| `CALLER_ID` | Yes | — | A number on your account, E.164. The caller ID on calls the app makes to phones, and on the app's leg of calls to your number (Vobiz rings an app only with one of your numbers there; the app shows the real caller from a header) |
 | `SIP_ENDPOINT` | Yes (inbound) | — | Who a call to your number rings: `sip:<endpoint>@registrar.vobiz.ai`, or `sip:<identity>_<auth id>@registrar.vobiz.ai` for access tokens. Comma-separate several to ring them together |
 | `VOBIZ_AUTH_ID` | Yes | — | Your Auth ID. `VOBIZ_ACCOUNT_SID`, the old name, still works |
 | `VOBIZ_AUTH_TOKEN` | Yes | — | Your Auth Token: tokens, push registration, transfer and signature checks |
@@ -763,7 +763,7 @@ await client.disconnect();         // REGISTER Expires: 0, then close the socket
 | --- | --- |
 | The app calls a number | `<Dial callerId="CALLER_ID" timeout="60"><Number>+91…</Number></Dial>` |
 | The app calls with `dialUser` | `<Dial callerId="CALLER_ID" timeout="RING_SECONDS"><User>sip:bob@registrar.vobiz.ai</User></Dial>` |
-| Someone calls your number | `<Dial timeout="RING_SECONDS"><User>…</User>…</Dial>`, one `<User>` per `SIP_ENDPOINT`, no `callerId` so the caller's number reaches the app |
+| Someone calls your number | `<Dial callerId="CALLER_ID" callerName="+91…" timeout="RING_SECONDS"><User sipHeaders="CallerX-VH=91…">…</User>…</Dial>`, one `<User>` per `SIP_ENDPOINT`. The real caller travels in the header (it arrives as `X-VH-CallerX-VH`) and the app shows it; a withheld caller has no header |
 | Transfer target | `<Speak>Please hold…</Speak><Dial callerId="CALLER_ID" timeout="60"><Number or User/></Dial><Speak>…</Speak>` |
 | A setting is missing | `<Speak>` naming it, so a test call tells you what to fix |
 
@@ -806,6 +806,7 @@ recomputes it with `PUBLIC_URL`, compares in constant time, and refuses a nonce 
 | The call screen is a notification, not full screen, on a locked phone | Android 14+: full-screen calls not allowed | Tap **Allow** on the dialer's banner |
 | A call connects with no audio, or one way | Microphone not granted, emulator microphone off, or a network that needs TURN | Grant the microphone; test on a phone; add TURN servers through `IceConfig` |
 | An outbound call fails at once | `CALLER_ID` is not a number on your account | Use one of your Vobiz numbers |
+| A call to your number hears "busy" at once, and the app never rings | The app's leg has no caller ID of your own (Vobiz then uses the caller's number and turns the call away), or `CALLER_ID` is not one of your numbers | Set `CALLER_ID` to a number on your account; the server sends it as `callerId` |
 | The app cannot reach the server | A phone cannot reach `10.0.2.2`; release builds refuse `http://` | Use the tunnel's `https://` address, or `adb reverse` |
 | A 10-digit number dials the wrong country | The default country code is `91` | Set `DEFAULT_COUNTRY_CODE` / `VOBIZ_DEFAULT_COUNTRY_CODE`, or dial `+` numbers |
 | "Transfer failed: This server answered no live call for this phone" | The call did not go through this server's `/answer` (for example a Call API call with another answer URL), or the server restarted during the call | Transfer works for calls to your number and calls the app made through this server |

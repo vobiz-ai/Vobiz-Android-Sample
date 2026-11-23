@@ -21,6 +21,24 @@ String? toE164(String input, {String countryCode = '91'}) {
   return RegExp(r'^\+\d{8,15}$').hasMatch(number) ? number : null;
 }
 
+/// The real caller of a call to your Vobiz number, from the header the sample
+/// server puts on the app's leg (`CallerX-VH`, which arrives as
+/// `X-VH-CallerX-VH`), as `+` and digits. Null without one.
+///
+/// That leg's caller ID is your own Vobiz number: Vobiz rings an app only
+/// with one of your numbers there, so the caller's own number travels in the
+/// header instead.
+String? callerFromHeaders(Map<String, String> headers) {
+  for (final entry in headers.entries) {
+    final name = entry.key.toLowerCase();
+    if (name.endsWith('-callerx-vh') || name.endsWith('-caller')) {
+      final digits = entry.value.replaceAll(RegExp(r'\D'), '');
+      if (digits.length >= 7 && digits.length <= 15) return '+$digits';
+    }
+  }
+  return null;
+}
+
 /// Who a call is with, for the screen: `sip:+9198...@registrar.vobiz.ai` and
 /// `"Name" <sip:alice@...>` become `+9198...` and `alice`.
 String displayParty(String raw) {

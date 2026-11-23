@@ -301,9 +301,19 @@ function createServer(config = loadConfig(), deps = {}) {
         }
         log(`[answer] ringing ${endpoints.map(sipUsername).join(', ')}`);
         for (const e of endpoints) rememberCall(sipUsername(e), params.CallUUID, false);
+        // The caller ID must be one of your Vobiz numbers. Without callerId, Vobiz takes the
+        // caller's own number for the app's leg and turns the call away at once as busy
+        // (USER_BUSY, "End Of XML Instructions"), and the app never rings. So the app's leg shows
+        // CALLER_ID, and the real caller goes along as callerName and in a SIP header the app
+        // shows instead: CallerX-VH, which arrives as X-VH-CallerX-VH (Vobiz takes only keys
+        // that end in X-VH). A withheld caller has no number to pass on.
+        const caller = formatToE164(from, config.defaultCountryCode);
+        const realCaller = E164_RE.test(caller) ? caller : '';
+        const callerName = realCaller ? ` callerName="${escapeXml(realCaller)}"` : '';
+        const userHeaders = realCaller ? ` sipHeaders="CallerX-VH=${realCaller.slice(1)}"` : '';
         return xml(`
-    <Dial timeout="${config.ringSeconds}">
-${endpoints.map((e) => `        <User>${escapeXml(e)}</User>`).join('\n')}
+    <Dial callerId="${escapeXml(config.callerId)}"${callerName} timeout="${config.ringSeconds}">
+${endpoints.map((e) => `        <User${userHeaders}>${escapeXml(e)}</User>`).join('\n')}
     </Dial>
 `);
     }

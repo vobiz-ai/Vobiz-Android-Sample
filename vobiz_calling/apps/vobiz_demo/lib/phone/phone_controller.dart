@@ -349,7 +349,9 @@ class PhoneController extends ChangeNotifier {
     final previous = callState;
     callState = e.state;
     callDirection = e.direction ?? callDirection;
-    final who = e.remoteIdentity ?? '';
+    // On a call to your number the caller ID is your own Vobiz number; the
+    // sample server passes the real caller in a header (callerFromHeaders).
+    final who = callerFromHeaders(e.headers) ?? e.remoteIdentity ?? '';
     if (who.isNotEmpty) remoteParty = displayParty(who);
     final wasIdle = previous == CallStateStatus.idle ||
         previous == CallStateStatus.ended ||

@@ -36,4 +36,22 @@ void main() {
       expect(displayParty('+919876543210'), '+919876543210');
     });
   });
+
+  group('callerFromHeaders', () {
+    test('reads the real caller the sample server sends (X-VH-CallerX-VH)', () {
+      expect(callerFromHeaders(<String, String>{'X-VH-CallerX-VH': '919876543210'}), '+919876543210');
+    });
+
+    test('ignores the header name case and a plain X-VH-Caller', () {
+      expect(callerFromHeaders(<String, String>{'x-vh-callerx-vh': '+91 98765 43210'}), '+919876543210');
+      expect(callerFromHeaders(<String, String>{'X-VH-Caller': '919876543210'}), '+919876543210');
+    });
+
+    test('is null without a usable header', () {
+      expect(callerFromHeaders(const <String, String>{}), isNull);
+      expect(callerFromHeaders(<String, String>{'X-VH-Reference': '919876543210'}), isNull);
+      expect(callerFromHeaders(<String, String>{'X-VH-CallerX-VH': 'anonymous'}), isNull);
+      expect(callerFromHeaders(<String, String>{'X-VH-Caller-ID': '919876543210'}), isNull);
+    });
+  });
 }

@@ -135,13 +135,22 @@ test('the app cannot call your own number or nothing', async () => {
     } finally { await s.close(); }
 });
 
-test('a call to your number rings every SIP_ENDPOINT in one Dial, caller passed through', async () => {
+test('a call to your number rings every SIP_ENDPOINT in one Dial, with your number as caller ID and the real caller in a header', async () => {
     const s = await start({ SIP_ENDPOINT: 'sip:alice@registrar.vobiz.ai, sip:bob_MA_TEST0001@registrar.vobiz.ai' });
     try {
         const body = await (await webhook(s, '/answer', { From: '919876543210', To: '918000000000', CallUUID: 'in-1' })).text();
-        assert.match(body, /<Dial timeout="45">/);
-        assert.ok(!body.includes('callerId'), 'no callerId: the caller\'s number reaches the app');
-        assert.match(body, /<User>sip:alice@registrar\.vobiz\.ai<\/User>\s*<User>sip:bob_MA_TEST0001@registrar\.vobiz\.ai<\/User>/);
+        // Without a callerId of your own, Vobiz turns the call to the app away at once as busy.
+        assert.match(body, /<Dial callerId="\+918000000000" callerName="\+919876543210" timeout="45">/);
+        assert.match(body, /<User sipHeaders="CallerX-VH=919876543210">sip:alice@registrar\.vobiz\.ai<\/User>\s*<User sipHeaders="CallerX-VH=919876543210">sip:bob_MA_TEST0001@registrar\.vobiz\.ai<\/User>/);
+    } finally { await s.close(); }
+});
+
+test('a withheld caller still rings the app with your number, and no header', async () => {
+    const s = await start({ SIP_ENDPOINT: 'sip:alice@registrar.vobiz.ai' });
+    try {
+        const body = await (await webhook(s, '/answer', { From: 'anonymous', To: '918000000000', CallUUID: 'in-2' })).text();
+        assert.match(body, /<Dial callerId="\+918000000000" timeout="45">\s*<User>sip:alice@registrar\.vobiz\.ai<\/User>/);
+        assert.ok(!body.includes('callerName') && !body.includes('sipHeaders'), 'nothing to pass on for a withheld caller');
     } finally { await s.close(); }
 });
 
