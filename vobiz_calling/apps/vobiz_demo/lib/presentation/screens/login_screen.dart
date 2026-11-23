@@ -166,15 +166,21 @@ class _LoginScreenState extends State<LoginScreen> {
                                       : 'Use 1 to 50 letters, digits, _ or -',
                                 ),
                               const SizedBox(height: 8),
-                              CheckboxListTile(
-                                value: _remember,
-                                onChanged: (bool? v) => setState(() => _remember = v ?? false),
-                                contentPadding: EdgeInsets.zero,
-                                controlAffinity: ListTileControlAffinity.leading,
-                                title: const Text('Remember me', style: TextStyle(color: Colors.white, fontSize: 14)),
-                                subtitle: const Text(
-                                  'Needed to take calls while the app is closed.',
-                                  style: TextStyle(color: VobizDemoApp.kMuted, fontSize: 12),
+                              // A transparent Material under the tile: on the card's
+                              // coloured box its ink splashes would not show otherwise
+                              // (Flutter 3.47+ asserts on that in debug builds and tests).
+                              Material(
+                                type: MaterialType.transparency,
+                                child: CheckboxListTile(
+                                  value: _remember,
+                                  onChanged: (bool? v) => setState(() => _remember = v ?? false),
+                                  contentPadding: EdgeInsets.zero,
+                                  controlAffinity: ListTileControlAffinity.leading,
+                                  title: const Text('Remember me', style: TextStyle(color: Colors.white, fontSize: 14)),
+                                  subtitle: const Text(
+                                    'Needed to take calls while the app is closed.',
+                                    style: TextStyle(color: VobizDemoApp.kMuted, fontSize: 12),
+                                  ),
                                 ),
                               ),
                               if (error != null && error.isNotEmpty) ...<Widget>[

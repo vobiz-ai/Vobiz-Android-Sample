@@ -419,14 +419,12 @@ class PhoneController extends ChangeNotifier {
   /// A push, from Android (any app state) or Firebase (app open). Vobiz holds
   /// the call for up to 30 s while the app signs in and claims it.
   void _onPushData(Map<String, String> data) {
+    // Only Vobiz's push for a call its registrar holds parses: type
+    // incoming_call with the hold's index, label and registrar. A held call
+    // that never arrives closes its screen through pushCallUpdates (expired).
     final p = VobizIncomingPush.tryParse(data);
     if (p == null) return;
-    if (p.kind == VobizPushKind.callEnded) {
-      _closingScreens.add(p.callId);
-      unawaited(callScreen.end(p.callId));
-      return;
-    }
-    if (!p.isHeldByVobiz || p.isTest || !_seenPushes.add(p.callId) || p.isExpired()) return;
+    if (!_seenPushes.add(p.callId) || p.isExpired()) return;
     if (hasCall) {
       // On a call already: claim it anyway and the SDK turns it away (busy).
       client.handleIncomingPush(p);

@@ -168,7 +168,6 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
       return '${d.inHours > 0 ? '${d.inHours}:' : ''}$minutes:$seconds';
     }
     return switch (c.callState) {
-      CallStateStatus.outgoing => 'Calling…',
       CallStateStatus.connecting => 'Connecting…',
       CallStateStatus.ringing => 'Ringing…',
       CallStateStatus.incoming => 'Incoming call',
