@@ -254,7 +254,7 @@ Remaining → PSTN caller + transfer target stay in conference
 
 ```
 sdk/
-├── vobiz_inbound/                     ← Main full-featured project
+├── vobiz_calling/                     ← Main full-featured project
 │   ├── Vobiz-RTC-demo/
 │   │   ├── server.js                  ← Node.js backend (all call orchestration)
 │   │   ├── .env                       ← Secrets: API keys, caller ID, public URL
@@ -964,7 +964,7 @@ final configuration = {
 
 ### 11.1 Backend `.env` File
 
-Located at `vobiz_inbound/Vobiz-RTC-demo/.env`:
+Located at `vobiz_calling/Vobiz-RTC-demo/.env`:
 
 | Variable | Example | Required | Description |
 |---|---|---|---|
@@ -1004,7 +1004,7 @@ Passed via `--dart-define` at build/run time:
 
 ```bash
 # Navigate to backend
-cd vobiz_inbound/Vobiz-RTC-demo
+cd vobiz_calling/Vobiz-RTC-demo
 
 # Install dependencies
 npm install
@@ -1024,7 +1024,7 @@ node server.js
 ### 12.3 Flutter App Setup
 
 ```bash
-cd vobiz_inbound/_zipinspect/vobiz_flutter
+cd vobiz_calling/_zipinspect/vobiz_flutter
 
 # Get dependencies
 flutter pub get
